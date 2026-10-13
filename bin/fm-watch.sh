@@ -2507,6 +2507,8 @@ if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
   WATCHER_RECOVERY_PENDING=0
 elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
   WATCHER_RECOVERY_PENDING=1
+elif [ "$FM_RECOVERY_MARKER_ACTION" = retired ]; then
+  WATCHER_RECOVERY_PENDING=0
 fi
 # Side-band ledger publication, detached from the poll loop.
 #
@@ -2668,13 +2670,27 @@ resurface_after_downtime() {
   if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
     return 0
   fi
-  if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
-    if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
-      echo "watcher: recovery state could not be consumed safely" >&2
-      exit 1
-    fi
-    [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
+  if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
+    echo "watcher: recovery state could not be consumed safely" >&2
+    exit 1
   fi
+  case "$FM_RECOVERY_MARKER_ACTION" in
+    recover) WATCHER_RECOVERY_PENDING=1 ;;
+    retired)
+      WATCHER_RECOVERY_PENDING=0
+      return 0
+      ;;
+    wait)
+      case "$FM_RECOVERY_MARKER_TOKEN" in
+        pending:handling:*|announced:handling:*)
+          WATCHER_RECOVERY_PENDING=0
+          return 0
+          ;;
+      esac
+      [ "$WATCHER_RECOVERY_PENDING" -eq 1 ] || return 0
+      ;;
+    *) [ "$WATCHER_RECOVERY_PENDING" -eq 1 ] || return 0 ;;
+  esac
   wake "check: rearm-resurface"
 }
 
