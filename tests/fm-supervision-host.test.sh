@@ -1637,8 +1637,9 @@ SH
   kill -TERM -- "-$pgid" 2>/dev/null || true
   left_watcher=$(cat "$home/state/.watch.lock/pid")
   main_drain "$home" >/dev/null
+  [ -n "$MAIN_ACK" ] || fail "slow takeover: main's drain printed no acknowledgement"
   # shellcheck disable=SC2086 # the printed acknowledgement arguments
-  [ -n "$MAIN_ACK" ] && FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@" >/dev/null 2>&1' "$ROOT/bin/fm-wake-drain.sh" $MAIN_ACK \
+  FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@" >/dev/null 2>&1' "$ROOT/bin/fm-wake-drain.sh" $MAIN_ACK \
     || fail "slow takeover: main's acknowledgement failed: $MAIN_ACK"
   assert_re '^acked:' "$home/state/.watcher-down" "fixture: main's acknowledgement did not retire the episode"
   : > "$home/slow.arm"
