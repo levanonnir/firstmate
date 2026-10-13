@@ -2680,6 +2680,15 @@ resurface_after_downtime() {
       WATCHER_RECOVERY_PENDING=0
       return 0
       ;;
+    wait)
+      case "$FM_RECOVERY_MARKER_TOKEN" in
+        pending:handling:*|announced:handling:*)
+          WATCHER_RECOVERY_PENDING=0
+          return 0
+          ;;
+      esac
+      [ "$WATCHER_RECOVERY_PENDING" -eq 1 ] || return 0
+      ;;
     *) [ "$WATCHER_RECOVERY_PENDING" -eq 1 ] || return 0 ;;
   esac
   wake "check: rearm-resurface"

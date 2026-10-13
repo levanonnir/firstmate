@@ -946,8 +946,9 @@ test_append_wakes_live_announced_watcher() {
 
 # A watcher can capture a recovery at startup, then the handling turn can
 # acknowledge that generation before the watcher's first poll reaches the
-# recovery resurface check. The captured startup bit must not outlive that
-# acknowledgement, while later real work still reaches the watcher.
+# recovery resurface check. The captured startup bit must not resurface while
+# the handling turn owns or has acknowledged that generation, while later real
+# work still reaches the watcher.
 test_acknowledged_handling_generation_is_not_resurfaced_by_startup_recovery() {
   local dir state fakebin watchout generation i real_date
   dir=$(make_case acknowledged-handling-startup-recovery)
@@ -975,8 +976,13 @@ SH
     || fail "fixture watcher did not capture its startup recovery"
 
   generation=$(recovery_marker_generation "$state/.watcher-down")
-  FM_STATE_OVERRIDE="$state" bash -c \
-    '. "$1"; fm_recovery_marker_begin_handling "$2" "$3" && fm_recovery_marker_ack "$2" "$3"' \
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_recovery_marker_begin_handling "$2" "$3"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down" "$generation" \
+    || fail "the handling turn could not begin handling startup recovery"
+  sleep 2
+  ! grep -F 'check: rearm-resurface' "$watchout" >/dev/null \
+    || fail "the captured startup recovery woke while a handling turn owned it: $(cat "$watchout")"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_recovery_marker_ack "$2" "$3"' \
     _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down" "$generation" \
     || fail "the handling turn could not acknowledge startup recovery"
   [ "$(cat "$state/.watcher-down")" = "acked:handling:$generation" ] \
