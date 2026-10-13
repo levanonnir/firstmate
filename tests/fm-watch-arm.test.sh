@@ -944,6 +944,56 @@ test_append_wakes_live_announced_watcher() {
   pass "watch-arm: appending work reopens an announced empty recovery"
 }
 
+# A watcher can capture a recovery at startup, then the handling turn can
+# acknowledge that generation before the watcher's first poll reaches the
+# recovery resurface check. The captured startup bit must not outlive that
+# acknowledgement, while later real work still reaches the watcher.
+test_acknowledged_handling_generation_is_not_resurfaced_by_startup_recovery() {
+  local dir state fakebin watchout generation i real_date
+  dir=$(make_case acknowledged-handling-startup-recovery)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  watchout="$dir/watch.out"
+  mkdir -p "$dir/home/data"
+  real_date=$(command -v date) || fail "no date command for the fixture"
+  cat > "$fakebin/date" <<SH
+#!/bin/sh
+case "\$*" in +%s) sleep 0.2 ;; esac
+exec "$real_date" "\$@"
+SH
+  chmod +x "$fakebin/date"
+  printf 'pending:downtime:fixture-generation\n' > "$state/.watcher-down"
+
+  start_seed_watcher "$state" "$fakebin" "$watchout" 1
+  i=0
+  while [ "$i" -lt 100 ] \
+    && [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" != 'announced:downtime:fixture-generation' ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = 'announced:downtime:fixture-generation' ] \
+    || fail "fixture watcher did not capture its startup recovery"
+
+  generation=$(recovery_marker_generation "$state/.watcher-down")
+  FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1"; fm_recovery_marker_begin_handling "$2" "$3" && fm_recovery_marker_ack "$2" "$3"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down" "$generation" \
+    || fail "the handling turn could not acknowledge startup recovery"
+  [ "$(cat "$state/.watcher-down")" = "acked:handling:$generation" ] \
+    || fail "the handling turn did not retire the captured recovery generation"
+
+  sleep 2
+  ! grep -F 'check: rearm-resurface' "$watchout" >/dev/null \
+    || fail "the captured startup recovery woke after acknowledgement: $(cat "$watchout")"
+  is_live_non_zombie "$SEED_PID" \
+    || fail "the acknowledged-recovery watcher exited instead of continuing supervision"
+
+  printf 'done: a later real wake must still surface\n' > "$state/demo.status"
+  wait_for_exit "$SEED_PID" 150 || fail "the watcher did not surface later real work"
+  grep -q '^signal:' "$watchout" || fail "the later real wake was not delivered: $(cat "$watchout")"
+  pass "watch-arm: acknowledgement retires a recovery captured before the handling turn"
+}
+
 # Exercise the handling-window recovery invariant owned by
 # docs/watcher-continuity.md through real watcher processes.
 test_handling_window_close_keeps_the_acknowledgement_valid() {
@@ -1734,6 +1784,7 @@ test_restart_preserves_recovery_across_reused_pid_lock
 test_markerless_legacy_queue_is_recovered_on_arm
 test_idle_lavish_source_stays_quiet_until_result
 test_append_wakes_live_announced_watcher
+test_acknowledged_handling_generation_is_not_resurfaced_by_startup_recovery
 test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
 test_downtime_marker_does_not_follow_symlink

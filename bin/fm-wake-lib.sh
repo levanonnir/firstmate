@@ -946,6 +946,11 @@ _fm_recovery_marker_arm_check() {
         fi
         # shellcheck disable=SC2034 # Output read by callers after this function returns.
         FM_RECOVERY_MARKER_ACTION='recover'
+      else
+        # A watcher can retain a startup recovery hint after the handling turn
+        # has acknowledged its generation. Tell the caller that the hint is
+        # retired so it cannot resurface an already-handled empty episode.
+        FM_RECOVERY_MARKER_ACTION='retired'
       fi
       ;;
   esac
