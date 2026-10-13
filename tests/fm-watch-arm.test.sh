@@ -959,7 +959,16 @@ test_acknowledged_handling_generation_is_not_resurfaced_by_startup_recovery() {
   real_date=$(command -v date) || fail "no date command for the fixture"
   cat > "$fakebin/date" <<SH
 #!/bin/sh
-case "\$*" in +%s) sleep 0.2 ;; esac
+case "\$*" in
+  +%s)
+    i=0
+    while [ "\$i" -lt 200 ] \\
+      && [ "\$(cat "$state/.watcher-down" 2>/dev/null)" = 'announced:downtime:fixture-generation' ]; do
+      sleep 0.05
+      i=\$((i + 1))
+    done
+    ;;
+esac
 exec "$real_date" "\$@"
 SH
   chmod +x "$fakebin/date"
