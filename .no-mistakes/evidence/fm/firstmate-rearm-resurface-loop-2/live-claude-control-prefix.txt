@@ -1,0 +1,31 @@
+# 14:11:56 control-prefix: bin/fm-watch-arm.sh taken from db34189
+# 14:12:12 control-prefix step 1: primary idle (claude pid 31960, 2.1.296 (Claude Code), model haiku); tracked Stop hook registered; config/supervision-host present; host pid 44553 parked on watcher 47155; listener runner 48797; captain prompts so far: 1
+# 14:12:12 control-prefix transcript: /Users/nirlevanon/.claude/projects/-private-var-folders-dh-ks6tdqm57yv6p9d--x14m7y40000gn-T-fm-sh-attended-live-5eQCWM-control-prefix-fm/e87cf6ca-f42c-410a-8388-8f2d6ae36fab.jsonl
+# 14:12:12 control-prefix: event 1 appended at 1791889932
+# 14:12:14 control-prefix: host log: 1791889934	pass-through	attended	main-only
+# 14:12:20 control-prefix: primary acknowledged event 1 (marker announced:handling:47155.1791889932.AKeGKh); slow watcher step armed
+# 14:12:21 control-prefix: acknowledged turn ended at 1791889941; slow step entered at 1791889941
+# 14:14:51 control-prefix: slow step left at 1791889956
+# 14:14:51 control-prefix: rewakes delivered to the idle primary in the 150s after the acknowledged turn: 1
+# 14:14:51 control-prefix: marker now: acked:handling:53654.1791889956.KUeeHI; queued rows: 0
+--- host log since e1
+1791889934	pass-through	attended	main-only	signal: /private/var/folders/dh/ks6tdqm57yv6p9d__x14m7y40000gn/T/fm-sh-attended-live.5eQCWM/control-prefix/fm/state/demo.status /private/var/folders/dh/ks6tdqm57yv6p9d__x14m7y40000gn/T/fm-sh-attended-live.5eQCWM/control-prefix/fm/state/demo2.status
+1791889941	start	gen=host-64290-1791889941	primary=claude
+1791889941	take-over	arm=53563
+1791889968	pass-through	a close without a wake
+1791889969	start	gen=host-86664-1791889968	primary=claude
+1791889970	pass-through	attended	main-only	check: rearm-resurface
+1791889976	start	gen=host-97609-1791889976	primary=claude
+1791889976	take-over	arm=89333
+--- cycle exits
+arm_pid=45743	watcher_pid=47155	origin=started	signal=none	reason=actionable-signal	beacon_age=2
+arm_pid=53563	watcher_pid=53654	origin=started	signal=TERM	reason=signal-exit	beacon_age=16
+arm_pid=64571	watcher_pid=53654	origin=attached	signal=unknown	reason=attached-cycle-ended	beacon_age=28
+arm_pid=87370	watcher_pid=87480	origin=started	signal=none	reason=actionable-check	beacon_age=0
+arm_pid=89333	watcher_pid=89385	origin=started	signal=TERM	reason=signal-exit	beacon_age=2
+arm_pid=98014	watcher_pid=89385	origin=attached	signal=unknown	reason=taken-over	beacon_age=2
+--- primary commands since turn end
+bin/fm-wake-drain.sh
+bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 53654.1791889956.KUeeHI
+# rearm-resurface seen: 1791889970	pass-through	attended	main-only	check: rearm-resurface
+not ok - control-prefix: 1 empty wake(s) after the acknowledged turn

@@ -1,0 +1,6 @@
+not ok - slow takeover: the next park did not own the home's only watcher cycle:
+59720 59465
+1791889265	start	gen=host-53771-1791889265	primary=claude
+1791889267	pass-through	attended	main-only	signal: /private/var/folders/dh/ks6tdqm57yv6p9d__x14m7y40000gn/T/fm-supervision-host.MERKVl/hook-takeover-slow/state/demo.status
+1791889271	start	gen=host-59465-1791889271	primary=claude
+1791889271	take-over	arm=55811

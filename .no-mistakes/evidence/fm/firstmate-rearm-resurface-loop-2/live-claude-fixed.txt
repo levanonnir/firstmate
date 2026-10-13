@@ -1,0 +1,20 @@
+# 14:12:08 fixed step 1: primary idle (claude pid 28938, 2.1.296 (Claude Code), model haiku); tracked Stop hook registered; config/supervision-host present; host pid 41066 parked on watcher 41658; listener runner 42233; captain prompts so far: 1
+# 14:12:08 fixed transcript: /Users/nirlevanon/.claude/projects/-private-var-folders-dh-ks6tdqm57yv6p9d--x14m7y40000gn-T-fm-sh-attended-live-CkknSj-fixed-fm/fee502a6-0720-4717-b112-5b786a51a0bd.jsonl
+# 14:12:08 fixed: event 1 appended at 1791889928
+# 14:12:10 fixed: host log: 1791889930	pass-through	attended	main-only
+# 14:12:16 fixed: primary acknowledged event 1 (marker acked:handling:41658.1791889929.knee80); slow watcher step armed
+# 14:12:18 fixed: acknowledged turn ended at 1791889938; slow step entered at 1791889937
+# 14:14:48 fixed: slow step left at 1791889952
+# 14:14:48 fixed: rewakes delivered to the idle primary in the 150s after the acknowledged turn: 0
+# 14:14:48 fixed: marker now: acked:handling:41658.1791889929.knee80; queued rows: 0
+--- host log since e1
+1791889930	pass-through	attended	main-only	signal: /private/var/folders/dh/ks6tdqm57yv6p9d__x14m7y40000gn/T/fm-sh-attended-live.CkknSj/fixed/fm/state/demo.status /private/var/folders/dh/ks6tdqm57yv6p9d__x14m7y40000gn/T/fm-sh-attended-live.CkknSj/fixed/fm/state/demo2.status
+1791889938	start	gen=host-60370-1791889938	primary=claude
+1791889938	take-over	arm=45225
+--- cycle exits
+arm_pid=41560	watcher_pid=41658	origin=started	signal=none	reason=actionable-signal	beacon_age=1
+arm_pid=45225	watcher_pid=45292	origin=started	signal=TERM	reason=signal-exit	beacon_age=15
+arm_pid=61028	watcher_pid=45292	origin=attached	signal=unknown	reason=taken-over	beacon_age=16
+--- primary commands since turn end
+
+ok - fixed: no empty wake after the acknowledged turn

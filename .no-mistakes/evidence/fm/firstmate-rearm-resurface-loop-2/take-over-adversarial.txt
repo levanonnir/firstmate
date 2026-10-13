@@ -1,0 +1,10 @@
+arm exited after 63s (stall bound 6s); arm output:
+watcher: attached pid=85163 (beacon 6s)
+cycle ledger:
+arm_pid=85693	watcher_pid=85163	origin=attached	started_at=1791889765	ended_at=1791889822	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=63	lock_before=pid:85163|identity:Tue Oct 13 14:09:19 2026     bash /Users/nirlevanon/.no-mistakes/worktrees/5564d43c02ec/01M4TCMKMC46MN6JEMJ4DNWFCW/bin/fm-watch.sh	lock_after=pid:85163|identity:Tue Oct 13 14:09:19 2026     bash /Users/nirlevanon/.no-mistakes/worktrees/5564d43c02ec/01M4TCMKMC46MN6JEMJ4DNWFCW/bin/fm-watch.sh	successor=none
+/Users/nirlevanon/.no-mistakes/worktrees/5564d43c02ec/01M4TCMKMC46MN6JEMJ4DNWFCW/bin/fm-watch-arm.sh: line 762: 85163 Killed: 9               FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$child_out"
+ok - watch-arm: --take-over of a frozen watcher gives up at the stall bound and attaches
+ok - watch-arm: --take-over owns a fresh cycle without a recovery wake and still surfaces queued work
+watcher: secondmate liveness check failed
+ok - watch-arm: takeover preserves self-exit downtime and surfaces a recovery wake
+ok - watch-arm: --take-over attaches to a cycle the named arm does not own and leaves it running
