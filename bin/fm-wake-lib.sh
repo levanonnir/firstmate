@@ -1167,6 +1167,27 @@ fm_lock_try_acquire_steal_mutex() {  # <steal-lock>
   fm_lock_try_create "$lockdir"
 }
 
+# A stale lock from the watcher that delivered an already-acknowledged recovery
+# wake is the same completed episode, not a new outage. Only suppress stale-lock
+# publication when the lock's exact pid and identity have a terminal delivery
+# record for that recovery wake; an unrecorded dead watcher remains an outage.
+_fm_stale_watcher_recovery_was_delivered() {  # <watch-lock>
+  local lockdir=$1 pid identity marker_token delivered_reason delivery_log
+  [ "$lockdir" = "$STATE/.watch.lock" ] || return 1
+  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  [ -n "$pid" ] && [ -n "$identity" ] || return 1
+  fm_recovery_marker_snapshot "$STATE/.watcher-down" || return 1
+  marker_token=$FM_RECOVERY_MARKER_TOKEN
+  case "$marker_token" in acked:handling:*) ;; *) return 1 ;; esac
+  delivery_log="$STATE/.watch-deliveries.log"
+  identity=$(printf '%s' "$identity" | tr '\t\r\n' '   ')
+  delivered_reason=$(awk -F '\t' -v pid="$pid" -v identity="$identity" \
+    '$1 == pid && $2 == identity { reason = $3 } END { print reason }' \
+    "$delivery_log" 2>/dev/null || true)
+  [ "$delivered_reason" = 'check: rearm-resurface' ]
+}
+
 fm_lock_try_acquire() {
   local lockdir=$1 pid steal cur rc steal_owner primary_owner current
   FM_LOCK_HELD_PID=
@@ -1245,6 +1266,7 @@ fm_lock_try_acquire() {
   fi
 
   if [ "$lockdir" = "$STATE/.watch.lock" ] \
+    && ! _fm_stale_watcher_recovery_was_delivered "$lockdir" \
     && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime; then
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$cur

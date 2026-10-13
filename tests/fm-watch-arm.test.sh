@@ -159,13 +159,21 @@ drain_ack_pair() {  # <drain-stderr>
   printf '%s\t%s\n' "$sequence" "$generation"
 }
 
-start_rearm_arm() {  # <home> <state> <fakebin> <arm-out> [predecessor-arm-pid]
-  local home=$1 state=$2 fakebin=$3 armout=$4 predecessor=${5:-} i
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
-    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
-    FM_WATCH_PREDECESSOR_ARM_PID="$predecessor" \
-    "$WATCH_ARM" --restart > "$armout" &
+start_rearm_arm() {  # <home> <state> <fakebin> <arm-out> [predecessor-arm-pid] [--restart or empty]
+  local home=$1 state=$2 fakebin=$3 armout=$4 predecessor=${5:-} mode=${6:---restart} i
+  if [ "$mode" = --restart ]; then
+    PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+      FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
+      FM_WATCH_PREDECESSOR_ARM_PID="$predecessor" \
+      "$WATCH_ARM" --restart > "$armout" &
+  else
+    PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+      FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
+      FM_WATCH_PREDECESSOR_ARM_PID="$predecessor" \
+      "$WATCH_ARM" > "$armout" &
+  fi
   ARM_PID=$!
   # Wait for the arm to confirm its watcher or exit, within a ceiling that
   # outlasts its confirmation budget. A fixed short count let a slow start fall
@@ -783,6 +791,72 @@ test_recovery_consumption_serializes_queue_publication() {
     || fail "publisher wake was not surfaced and drained"
   ack_wakes "$state" || fail "publisher handling acknowledgement failed"
   pass "watch-arm: publication after recovery handoff is surfaced"
+}
+
+test_acknowledged_stop_rearm_does_not_reopen_its_delivered_recovery() {
+  local dir home state fakebin lock_pid identity
+  local outage_dir outage_home outage_state outage_fakebin
+  dir=$(make_case acknowledged-stop-rearm)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data" "$home/config"
+  printf 'announced:downtime:stop-rearm-generation\n' > "$state/.watcher-down"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" \
+    2> "$dir/drain.err" || fail "empty recovery drain failed"
+  grep -q '^WAKE_ACK_REQUIRED:.*--ack-through 0 --recovery-generation stop-rearm-generation$' \
+    "$dir/drain.err" || fail "empty recovery drain did not require its generation-bound acknowledgement"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through 0 \
+    --recovery-generation stop-rearm-generation || fail "empty recovery acknowledgement failed"
+  [ "$(cat "$state/.watcher-down")" = 'acked:handling:stop-rearm-generation' ] \
+    || fail "empty recovery acknowledgement did not retire its handling generation"
+
+  # Reproduce the stale lock left by the cycle that delivered this recovery.
+  # The next Stop-owned re-arm must recognize its matching terminal delivery,
+  # while an otherwise identical stale lock with no delivery record remains a
+  # genuine outage and still surfaces once.
+  lock_pid=99999999
+  identity=fixture-stale-watcher
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$lock_pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  printf '%s\t%s\tcheck: rearm-resurface\n' "$lock_pid" "$identity" > "$state/.watch-deliveries.log"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/stop-rearm.out" '' ''
+  is_live_non_zombie "$ARM_PID" || fail "Stop-owned re-arm did not leave a live watcher"
+  sleep 2
+  ! grep -F 'check: rearm-resurface' "$dir/stop-rearm.out" >/dev/null \
+    || fail "Stop-owned re-arm reopened the already-acknowledged recovery: $(cat "$dir/stop-rearm.out")"
+  [ "$(cat "$state/.watcher-down")" = 'acked:handling:stop-rearm-generation' ] \
+    || fail "Stop-owned re-arm replaced the acknowledged recovery generation"
+  kill "$ARM_PID" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  ARM_PID=
+
+  outage_dir=$(make_case acknowledged-genuine-outage)
+  outage_home="$outage_dir/home"
+  outage_state="$outage_dir/state"
+  outage_fakebin="$outage_dir/fakebin"
+  mkdir -p "$outage_home/data" "$outage_home/config" "$outage_state/.watch.lock"
+  printf 'acked:handling:genuine-outage-generation\n' > "$outage_state/.watcher-down"
+  printf '%s\n' "$lock_pid" > "$outage_state/.watch.lock/pid"
+  printf '%s\n' "$outage_home" > "$outage_state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$outage_state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$outage_state/.watch.lock/pid-identity"
+
+  start_rearm_arm "$outage_home" "$outage_state" "$outage_fakebin" "$outage_dir/outage-rearm.out"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" \
+    || fail "genuine stale-watcher outage did not resurface"
+  grep -F 'check: rearm-resurface' "$outage_dir/outage-rearm.out" >/dev/null \
+    || fail "genuine stale-watcher outage was suppressed without a matching delivery record"
+  case "$(cat "$outage_state/.watcher-down")" in
+    announced:downtime:*) ;;
+    *) fail "genuine outage did not publish a new announced recovery generation" ;;
+  esac
+  pass "watch-arm: an acknowledged Stop recovery stays retired while a genuine outage still resurfaces"
 }
 
 test_restart_preserves_recovery_across_reused_pid_lock() {
@@ -1795,6 +1869,7 @@ test_delivery_gap_wake_is_recovered_once
 test_interrupted_handling_is_redrained_on_rearm
 test_malformed_marker_is_quarantined_once
 test_recovery_consumption_serializes_queue_publication
+test_acknowledged_stop_rearm_does_not_reopen_its_delivered_recovery
 test_restart_preserves_recovery_across_reused_pid_lock
 test_markerless_legacy_queue_is_recovered_on_arm
 test_idle_lavish_source_stays_quiet_until_result

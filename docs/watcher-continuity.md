@@ -223,6 +223,7 @@ A non-successor watcher start checks the durable queue and recovery marker under
 If an announced-but-unacknowledged episode has an empty queue, the arm leaves that generation announced, making repeated empty-queue arms idempotent while a long-poll source is merely alive.
 If a durable row arrived after the announcement, the arm opens a fresh pending downtime generation so buried work still resurfaces once.
 A recovery captured at watcher startup is rechecked before resurface, so a handling turn that has begun owning the episode, or an acknowledgement that retires its generation, suppresses the stale hint while newly queued work still opens recovery.
+When stale-lock recovery sees the same watcher's recorded `check: rearm-resurface` delivery and its handling generation is already acknowledged, it preserves that completed episode; stale locks without that delivery evidence still publish downtime.
 A Codex foreground checkpoint skips the announced-episode reopen transition, so an already-announced generation stays announced while the checkpoint continues its bounded supervision.
 Its ordinary arm check still announces a never-announced generation, including one made pending by a durable queue append during the checkpoint.
 
