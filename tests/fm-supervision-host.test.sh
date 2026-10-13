@@ -1601,6 +1601,60 @@ test_next_park_takes_over_the_cycle_a_pass_through_left_for_main() {
   pass "host+hook: the next park takes over the cycle a main-only pass-through left, so one arm owns it"
 }
 
+# The live loop (2026-10-13): the next park's take-over sent TERM while the
+# left watcher sat in a slow command substitution, which bash 3.2 holds TERM
+# through. The take-over gave up after five seconds and attached, the held
+# TERM then ended the watcher, its close reopened the acknowledged episode as
+# downtime, the attach ended without a wake, and the Stop hook's retry
+# announced that downtime as an empty "check: rearm-resurface" to main, again
+# after every handling turn. Here the left watcher's next `ps` command
+# substitution blocks for eight seconds once, beyond that five-second bound.
+test_take_over_of_a_slow_cycle_keeps_the_acknowledged_episode_quiet() {
+  local home pgid left_watcher
+  home=$(make_primary_home hook-takeover-slow)
+  cat > "$home/fakebin/ps" <<SH
+#!/bin/bash
+watcher=\$(cat "$home/state/.watch.lock/pid" 2>/dev/null)
+if [ -e "$home/slow.arm" ] && [ -n "\$watcher" ] \\
+  && { [ "\$PPID" = "\$watcher" ] || [ "\$(/bin/ps -o ppid= -p "\$PPID" | tr -d ' ')" = "\$watcher" ]; }; then
+  rm -f "$home/slow.arm"
+  : > "$home/slow.busy"
+  sleep 8
+  rm -f "$home/slow.busy"
+fi
+exec /bin/ps "\$@"
+SH
+  chmod +x "$home/fakebin/ps"
+  : > "$home/hook.own-group"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "slow takeover: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  append_status "$home" 'which export format?' needs-decision
+  wait_until 250 hook_exited "$home" || fail "slow takeover: the decision close never reached the Stop hook: $(cat "$home/state/.supervision-host.log")"
+  assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" "fixture: the close was not a main-only pass-through"
+  assert_rewoke_main "$home" "slow takeover (pass-through)"
+  pgid=$(cat "$home/hook.pgid")
+  kill -TERM -- "-$pgid" 2>/dev/null || true
+  left_watcher=$(cat "$home/state/.watch.lock/pid")
+  main_drain "$home" >/dev/null
+  # shellcheck disable=SC2086 # the printed acknowledgement arguments
+  [ -n "$MAIN_ACK" ] && FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@" >/dev/null 2>&1' "$ROOT/bin/fm-wake-drain.sh" $MAIN_ACK \
+    || fail "slow takeover: main's acknowledgement failed: $MAIN_ACK"
+  assert_re '^acked:' "$home/state/.watcher-down" "fixture: main's acknowledgement did not retire the episode"
+  : > "$home/slow.arm"
+  wait_until 100 test -e "$home/slow.busy" || fail "fixture: the left watcher never entered its slow step"
+  turn_end "$home"
+  wait_until 250 host_owns_the_only_cycle "$home" \
+    || fail "slow takeover: the next park did not own the home's only watcher cycle:"$'\n'"$(home_arms "$home")"$'\n'"$(cat "$home/state/.supervision-host.log")"
+  ! kill -0 "$left_watcher" 2>/dev/null || fail "slow takeover: the left watcher still runs (pid $left_watcher)"
+  sleep 2
+  ! hook_exited "$home" || fail "slow takeover: the takeover woke main: $(cat "$home/hook.err")"
+  assert_re '^acked:' "$home/state/.watcher-down" "slow takeover: the slow stop reopened the acknowledged episode"
+  assert_no_re 'rearm-resurface|a close without a wake' "$home/state/.supervision-host.log" "slow takeover: the takeover abandoned its stop"
+  stop_home_processes "$home"
+  pass "host+hook: a take-over waits out a slow cycle step and keeps the acknowledged episode quiet"
+}
+
 # A park stopped before its take-over stops the left cycle (here held in the
 # take-over's handover snapshot by the recovery-marker lock) must not forget
 # that cycle's arm: the park the Stop hook runs next still takes it over rather
@@ -2994,6 +3048,7 @@ test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails
 test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end
 test_pass_through_successor_survives_the_hook_process_group_teardown
 test_next_park_takes_over_the_cycle_a_pass_through_left_for_main
+test_take_over_of_a_slow_cycle_keeps_the_acknowledged_episode_quiet
 test_a_park_stopped_mid_take_over_leaves_the_take_over_to_the_next_park
 test_unrecorded_successor_is_stopped_rather_than_left_for_main
 test_primary_without_a_verified_mirror_runs_away_only
