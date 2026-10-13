@@ -76,7 +76,7 @@
 # arm would, and otherwise this arm owns a fresh cycle as a plain arm does.
 # Recovery restoration follows docs/watcher-continuity.md "Generation reuse";
 # an unconfirmed stop leaves downtime for the fresh cycle's recovery check.
-# Any other watcher, or one that outlives the stop,
+# Any other watcher, or one that outlives the stop past the stall bound,
 # is attached to exactly as a plain arm attaches.
 #
 # --stop: the same home-scoped stop without re-arming, for an owner that ends
@@ -552,7 +552,7 @@ fi
 # to exit (header, --take-over). Returns 3 after printing the reason that cycle
 # delivered before the stop landed, 0 once it stopped without delivering, and
 # 1 when it was not stopped (its handover state was unreadable, or it outlived
-# the stop), which leaves it to the plain attach below.
+# the stop past the stall bound), which leaves it to the plain attach below.
 take_over_cycle() {  # <watcher-pid> <identity>
   local pid=$1 i owner_signal
   cycle_begin "$pid" attached "$2"
@@ -560,14 +560,10 @@ take_over_cycle() {  # <watcher-pid> <identity>
   if attached_holder_live "$pid"; then
     kill -TERM "$pid" 2>/dev/null || true
   fi
-  i=0
-  while [ "$i" -lt 50 ] && fm_pid_alive "$pid"; do
+  while fm_pid_alive "$pid"; do
+    [ "$(fm_path_age "$BEAT")" -lt "$STALL_BOUND" ] || return 1
     sleep 0.1
-    i=$((i + 1))
   done
-  if fm_pid_alive "$pid"; then
-    return 1
-  fi
   if cycle_delivered_reason; then
     cycle_log_append unknown unknown taken-over-delivered-wake none
     printf '%s\n' "$DELIVERED_REASON"
