@@ -86,6 +86,18 @@
 # command's own output, marked as the forge's text and kept apart from this
 # script's verdict, including the refusal for an outcome that cannot be read;
 # a merge command that failed keeps its original error surfaced raw and first.
+# A pull request that belongs to a GitHub stack is refused by the synchronous
+# merge with a message naming the asynchronous merge REST API. Only that exact
+# refusal selects github_merge_stack_async: after the same verification, still
+# inside the same critical section, it calls PUT pulls/<n>/merge-async with the
+# verified head as sha, so GitHub cancels the merge if the head moved, and with
+# the caller's merge method (squash by default). A pending result is polled for
+# a bounded time, a failed result refuses, and in every case only the pull
+# request itself reading merged or queued counts as landed, so a merge still
+# pending when the bound is spent refuses as unproved. Extra arguments beyond a
+# merge method have no REST translation and refuse, and the whole path refuses
+# while the away-posture record exists, like --auto, because the merge is
+# asynchronous.
 # GitLab adds no method flag at all: its merge method is the project's own
 # setting, which the merge API applies, and imposing squash there would override
 # that convention rather than mirror the GitHub default.
@@ -762,7 +774,10 @@ FIELDS
 # flag such as --auto, --admin, or --delete-branch into a Forgejo API field
 # yet (reject_protected_forge_args above already forbids those exact spellings
 # outright), so anything else is refused rather than silently dropped.
-forgejo_reject_unsupported_args() {
+# Whether every extra argument names only a merge method, in the forms
+# caller_has_merge_method accepts. Forges whose merge goes through a REST body
+# rather than a CLI flag parser have no translation for anything else.
+caller_args_are_method_only() {
   local arg pending=false
   for arg in "$@"; do
     if [ "$pending" = true ]; then
@@ -773,12 +788,15 @@ forgejo_reject_unsupported_args() {
       --squash|--merge|--rebase) ;;
       --method) pending=true ;;
       --method=*) ;;
-      *)
-        echo "error: extra merge arguments are not yet supported for Forgejo merges" >&2
-        return 1
-        ;;
+      *) return 1 ;;
     esac
   done
+}
+
+forgejo_reject_unsupported_args() {
+  caller_args_are_method_only "$@" && return 0
+  echo "error: extra merge arguments are not yet supported for Forgejo merges" >&2
+  return 1
 }
 
 # The merge style a Forgejo merge uses when the caller names none: the
@@ -1558,6 +1576,145 @@ github_report_unmerged_outcome() {
   github_report_queue_rules
 }
 
+# GitHub refuses the synchronous merge of a pull request that belongs to a
+# stack and names the asynchronous merge REST API as the only way to land it.
+# Only that refusal, matched on both halves of GitHub's own sentence, selects
+# the fallback below; every other merge failure keeps its original handling.
+github_merge_refused_as_stack() {
+  case $1 in
+    *"part of a stack"*"asynchronous merge REST API"*) return 0 ;;
+  esac
+  return 1
+}
+
+# Same-shaped REST path for the request and its result, read with the API
+# version that documents the endpoint.
+github_async_merge_path() {
+  printf 'repos/%s/%s/pulls/%s/merge-async' "$PR_OWNER" "$PR_REPO" "$PR_NUMBER"
+}
+GITHUB_ASYNC_MERGE_VERSION=2026-03-10
+
+# The result's top-level status (pending, merged, enqueued or failed) read from
+# a merge-async response body. Fails on anything that is not that shape.
+github_async_merge_status() {
+  printf '%s' "$1" | jq -r \
+    'if type == "object" and (.status | type == "string") then .status else error("invalid status") end' \
+    2>/dev/null
+}
+
+# The human message GitHub attaches to a failed result, if it sent one.
+github_async_merge_message() {
+  printf '%s' "$1" | jq -r '(.details.message // .message // "") | tostring' 2>/dev/null || true
+}
+
+release_merge_locks() {
+  fm_afk_contract_lock_release || true
+  fm_lock_release "$MERGE_CONTROL_LOCK" || true
+  MERGE_CONTROL_LOCK=
+}
+
+FM_PR_GITHUB_ASYNC_UUID=
+FM_PR_GITHUB_ASYNC_BODY=
+
+# Submit the stack-aware merge for the verified head. The request is pinned to
+# FM_PR_MERGE_HEAD through sha, so GitHub cancels it when the head has moved.
+# Returns 0 only when GitHub accepted the request, leaving the locks held for
+# the caller's accepted-merge bookkeeping; every refusal releases them and
+# returns non-zero. A pending result sets FM_PR_GITHUB_ASYNC_UUID for
+# github_await_async_merge. The merge is asynchronous by nature, so it is
+# refused while the away record exists, as --auto is: it could land after the
+# away authority lapsed.
+github_merge_stack_async() {
+  local method body status
+  if [ "$FM_PR_AWAY_POSTURE" = true ]; then
+    release_merge_locks
+    echo "error: $URL is part of a stack, which GitHub merges only asynchronously; refused while the away-posture record exists because the merge could land after its authority lapsed" >&2
+    return 2
+  fi
+  if ! caller_args_are_method_only "$@"; then
+    release_merge_locks
+    echo "error: $URL is part of a stack; extra merge arguments beyond a merge method cannot be passed to GitHub's asynchronous merge API" >&2
+    return 1
+  fi
+  method=$(caller_merge_method "$@" | tr '[:upper:]' '[:lower:]')
+  [ -n "$method" ] || method=squash
+  case "$method" in
+    merge|squash|rebase) ;;
+    *)
+      release_merge_locks
+      echo "error: $URL is part of a stack; merge method '$method' is not one GitHub's asynchronous merge API accepts" >&2
+      return 1
+      ;;
+  esac
+  printf 'actionable: %s is part of a stack; merging through GitHub'"'"'s asynchronous merge API at head %s\n' \
+    "$URL" "$FM_PR_MERGE_HEAD" >&2
+  if ! body=$(gh api -X PUT "$(github_async_merge_path)" \
+    -H "X-GitHub-Api-Version: $GITHUB_ASYNC_MERGE_VERSION" \
+    -f "sha=$FM_PR_MERGE_HEAD" -f "merge_method=$method" 2>&1); then
+    release_merge_locks
+    [ -z "$body" ] || printf 'error: > %s\n' "$body" >&2
+    echo "error: GitHub's asynchronous merge API rejected the request for $URL; nothing was merged" >&2
+    return 1
+  fi
+  FM_PR_GITHUB_ASYNC_BODY=$body
+  if ! status=$(github_async_merge_status "$body"); then
+    release_merge_locks
+    printf 'error: > %s\n' "$body" >&2
+    echo "error: GitHub's asynchronous merge API answered $URL with a response this script cannot read; nothing is proven merged" >&2
+    return 1
+  fi
+  case "$status" in
+    pending)
+      FM_PR_GITHUB_ASYNC_UUID=$(printf '%s' "$body" | jq -r '.details.uuid // ""' 2>/dev/null || true)
+      if [ -z "$FM_PR_GITHUB_ASYNC_UUID" ]; then
+        release_merge_locks
+        printf 'error: > %s\n' "$body" >&2
+        echo "error: GitHub's asynchronous merge API left $URL pending without a request id to poll; nothing is proven merged" >&2
+        return 1
+      fi
+      ;;
+    merged|enqueued) ;;
+    *)
+      release_merge_locks
+      printf 'error: GitHub'"'"'s asynchronous merge of %s did not succeed: status=%s: %s\n' \
+        "$URL" "$status" "$(github_async_merge_message "$body")" >&2
+      return 1
+      ;;
+  esac
+}
+
+# Poll the accepted request until it leaves pending, a bounded number of times,
+# then leave the proof to github_read_outcome: a result is only a hint, and only
+# the pull request itself reading merged (or queued) counts as landed. A failed
+# result exits here because GitHub has said the merge did not happen, which is
+# also what a head that moved after verification looks like.
+github_await_async_merge() {
+  local attempt=1 limit=30 delay body status
+  delay=${FM_PR_GITHUB_ASYNC_POLL_DELAY:-2}
+  case "$delay" in
+    [0-9] | 10) ;;
+    *) delay=2 ;;
+  esac
+  while [ "$attempt" -le "$limit" ]; do
+    if body=$(gh api "$(github_async_merge_path)/$FM_PR_GITHUB_ASYNC_UUID" \
+      -H "X-GitHub-Api-Version: $GITHUB_ASYNC_MERGE_VERSION" 2>/dev/null) \
+      && status=$(github_async_merge_status "$body"); then
+      case "$status" in
+        merged|enqueued) return 0 ;;
+        failed)
+          printf 'error: GitHub'"'"'s asynchronous merge of %s failed: %s\n' \
+            "$URL" "$(github_async_merge_message "$body")" >&2
+          exit 1
+          ;;
+      esac
+    fi
+    [ "$attempt" -lt "$limit" ] && sleep "$delay"
+    attempt=$((attempt + 1))
+  done
+  printf 'error: GitHub'"'"'s asynchronous merge of %s (request %s) was still pending after %s checks; the merge is not proven\n' \
+    "$URL" "$FM_PR_GITHUB_ASYNC_UUID" "$limit" >&2
+}
+
 gitlab_confirm_merged() {
   local json state
   if ! json=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" \
@@ -1658,6 +1815,13 @@ case "$PROVIDER" in
     merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       --match-head-commit "$FM_PR_MERGE_HEAD" \
       "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1) || merge_status=$?
+    if [ "$merge_status" -ne 0 ] && github_merge_refused_as_stack "$merge_output"; then
+      stack_status=0
+      github_merge_stack_async "$@" || stack_status=$?
+      [ "$stack_status" -eq 0 ] || exit "$stack_status"
+      merge_output=$FM_PR_GITHUB_ASYNC_BODY
+      merge_status=0
+    fi
     if [ "$merge_status" -eq 0 ]; then
       FM_PR_GITHUB_MERGE_ACCEPTED=true
       persist_accepted_merge_authority || exit 1
@@ -1679,6 +1843,7 @@ case "$PROVIDER" in
       fi
       exit "$merge_status"
     fi
+    [ -z "$FM_PR_GITHUB_ASYNC_UUID" ] || github_await_async_merge
     if ! github_read_outcome; then
       github_report_forge_output "$merge_output"
       exit 1
