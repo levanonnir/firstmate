@@ -255,6 +255,22 @@ case "${1:-} ${2:-}" in
     # The required-check reads: the branch itself, and its rules read without
     # the merge-queue filter the queue reader below applies.
     case " $* " in
+      *" repos/"*"/pulls/"*"/merge-async"*)
+        case " $* " in
+          *" -X PUT "*)
+            cat "$FM_TEST_GH_ASYNC_PUT_BODY"
+            [ ! -f "$FM_TEST_GH_ASYNC_PUT_FAIL" ] || exit 1
+            exit 0
+            ;;
+        esac
+        # The result read: line N of the sequence, the last line repeating.
+        call_n=$(( $(cat "$FM_TEST_GH_ASYNC_CALLS" 2>/dev/null || echo 0) + 1 ))
+        printf '%s\n' "$call_n" > "$FM_TEST_GH_ASYNC_CALLS"
+        call_r=$(sed -n "${call_n}p" "$FM_TEST_GH_ASYNC_RESULTS")
+        [ -n "$call_r" ] || call_r=$(tail -n1 "$FM_TEST_GH_ASYNC_RESULTS")
+        printf '%s\n' "$call_r"
+        exit 0
+        ;;
       *" repos/"*"/commits/"*"/check-runs"*)
         case "$*" in
           *"/commits/$(cat "$FM_TEST_GH_HEAD")/check-runs"*) ;;
@@ -672,6 +688,10 @@ run_pr_merge() {
   FM_TEST_GH_HEAD="$case_dir/github-head" \
   FM_TEST_GH_RUNS="$case_dir/github-runs.json" \
   FM_TEST_GH_MERGE_RC_FILE="$case_dir/github-merge-rc" \
+  FM_TEST_GH_ASYNC_PUT_BODY="$case_dir/github-async-put-body" \
+  FM_TEST_GH_ASYNC_PUT_FAIL="$case_dir/github-async-put-fail" \
+  FM_TEST_GH_ASYNC_RESULTS="$case_dir/github-async-results" \
+  FM_TEST_GH_ASYNC_CALLS="$case_dir/github-async-calls" \
   FM_TEST_GH_MERGE_OUTPUT="$(cat "$case_dir/github-merge-output" 2>/dev/null || true)" \
   FM_TEST_GH_GRAPHQL_FAIL="$case_dir/github-graphql-fail" \
   FM_TEST_GH_RULES_FAIL="$case_dir/github-rules-fail" \
@@ -2926,6 +2946,230 @@ test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance
 test_github_conflicting_queue_rules_report_ambiguity
+
+# GitHub refuses the synchronous merge of a stacked pull request and names the
+# asynchronous merge REST API. A mock case where that refusal is the only
+# thing wrong: the request body GitHub returns for the PUT, and the sequence of
+# results the poll reads (one JSON line each, the last repeating).
+# Args: case_dir put_body result_line...
+add_stack_refusal_case() {
+  local case_dir=$1 put_body=$2
+  shift 2
+  add_gh_mocks_merge_fails "$case_dir" 5151515151515151515151515151515151515151
+  printf 'GraphQL: This pull request is part of a stack and must be merged using the asynchronous merge REST API (mergePullRequest)\n' \
+    > "$case_dir/github-merge-output"
+  printf '%s\n' "$put_body" > "$case_dir/github-async-put-body"
+  printf '%s\n' "$@" > "$case_dir/github-async-results"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+}
+
+assert_async_merge_put() {
+  local case_dir=$1 method=$2 head
+  head=$(cat "$case_dir/github-head")
+  grep -F 'api -X PUT repos/example/repo/pulls/71/merge-async' "$case_dir/gh.log" \
+    | grep -qF -- "-f sha=$head -f merge_method=$method" \
+    || fail "expected one merge-async PUT pinned to $head with $method, got: $(grep merge-async "$case_dir/gh.log" || true)"
+}
+
+PENDING_BODY='{"status":"pending","details":{"uuid":"u-1","merge_method":"squash","merge_action":"default","expected_head_sha":"5151515151515151515151515151515151515151"}}'
+PENDING_RESULT='{"status":"pending","details":{"uuid":"u-1"}}'
+MERGED_RESULT='{"status":"merged","details":{"sha":"9999999999999999999999999999999999999999"}}'
+
+test_github_stacked_pr_merges_through_the_async_api() {
+  local case_dir rc
+  case_dir=$(make_case github-stack-merges)
+  mkdir -p "$case_dir/wt"
+  add_stack_refusal_case "$case_dir" "$PENDING_BODY" "$PENDING_RESULT" "$MERGED_RESULT"
+  write_github_outcome "$case_dir" MERGED true false main
+
+  set +e
+  FM_PR_GITHUB_ASYNC_POLL_DELAY=0 run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "github-stack-merges: a stacked PR must merge through the async API"
+  assert_logged_gh_merge "$case_dir" 71 example/repo --squash
+  assert_async_merge_put "$case_dir" squash
+  assert_equals 2 "$(cat "$case_dir/github-async-calls")" \
+    "github-stack-merges: the pending result was not polled until it merged"
+  assert_grep 'verified: https://github.com/example/repo/pull/71 is merged' "$case_dir/stdout" \
+    "github-stack-merges: the merge was not proven from the pull request itself"
+  assert_grep 'pr_head=5151515151515151515151515151515151515151' "$case_dir/state/task-x1.meta" \
+    "github-stack-merges: the verified head was not recorded"
+  pass "fm-pr-merge merges a stacked GitHub PR through the head-pinned async API and proves it"
+}
+
+test_github_stacked_pr_passes_the_callers_merge_method() {
+  local case_dir rc
+  case_dir=$(make_case github-stack-method)
+  mkdir -p "$case_dir/wt"
+  add_stack_refusal_case "$case_dir" "$PENDING_BODY" "$MERGED_RESULT"
+  write_github_outcome "$case_dir" MERGED true false main
+
+  set +e
+  FM_PR_GITHUB_ASYNC_POLL_DELAY=0 run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 -- --rebase \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "github-stack-method: a stacked PR must merge with the caller's method"
+  assert_async_merge_put "$case_dir" rebase
+  pass "fm-pr-merge sends the caller's merge method to the async stack merge"
+}
+
+test_github_stacked_pr_head_moved_refuses() {
+  local case_dir rc
+  case_dir=$(make_case github-stack-head-moved)
+  mkdir -p "$case_dir/wt"
+  add_stack_refusal_case "$case_dir" "$PENDING_BODY" \
+    '{"status":"failed","details":{"message":"Head branch was modified. Review and try the merge again."}}'
+  write_github_outcome "$case_dir" OPEN false false main
+
+  set +e
+  FM_PR_GITHUB_ASYNC_POLL_DELAY=0 run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-stack-head-moved: a cancelled async merge must refuse"
+  assert_async_merge_put "$case_dir" squash
+  assert_grep 'Head branch was modified' "$case_dir/stderr" \
+    "github-stack-head-moved: GitHub's failure was not reported"
+  assert_no_grep 'verified: ' "$case_dir/stdout" \
+    "github-stack-head-moved: an unmerged PR was reported as merged"
+  pass "fm-pr-merge refuses a stacked merge GitHub cancelled because the head moved"
+}
+
+test_github_stacked_pr_rejected_request_refuses() {
+  local case_dir rc
+  case_dir=$(make_case github-stack-rejected)
+  mkdir -p "$case_dir/wt"
+  add_stack_refusal_case "$case_dir" \
+    '{"message":"Another merge request is already pending for this pull request"}' "$MERGED_RESULT"
+  : > "$case_dir/github-async-put-fail"
+  write_github_outcome "$case_dir" OPEN false false main
+
+  set +e
+  FM_PR_GITHUB_ASYNC_POLL_DELAY=0 run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-stack-rejected: a rejected async request must refuse"
+  assert_grep 'already pending' "$case_dir/stderr" \
+    "github-stack-rejected: GitHub's rejection was not quoted"
+  assert_grep 'rejected the request' "$case_dir/stderr" \
+    "github-stack-rejected: the refusal did not say the request was rejected"
+  assert_absent "$case_dir/github-async-calls" \
+    "github-stack-rejected: a rejected request was polled anyway"
+  pass "fm-pr-merge refuses when GitHub rejects the async stack merge request"
+}
+
+test_github_stacked_pr_never_confirming_is_not_merged() {
+  local case_dir rc
+  case_dir=$(make_case github-stack-never-confirms)
+  mkdir -p "$case_dir/wt"
+  add_stack_refusal_case "$case_dir" "$PENDING_BODY" "$PENDING_RESULT"
+  write_github_outcome "$case_dir" OPEN false false main
+
+  set +e
+  FM_PR_GITHUB_ASYNC_POLL_DELAY=0 run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-stack-never-confirms: an unconfirmed async merge must not succeed"
+  assert_equals 30 "$(cat "$case_dir/github-async-calls")" \
+    "github-stack-never-confirms: the wait was not bounded at 30 checks"
+  assert_grep 'still pending after 30 checks' "$case_dir/stderr" \
+    "github-stack-never-confirms: the pending bound was not reported"
+  assert_grep 'state=OPEN, merged=false' "$case_dir/stderr" \
+    "github-stack-never-confirms: the observed state was not named"
+  assert_no_grep 'verified: ' "$case_dir/stdout" \
+    "github-stack-never-confirms: an unproved merge was reported as merged"
+  assert_present "$case_dir/state/task-x1.check.sh" \
+    "github-stack-never-confirms: the pending merge lost its armed poll"
+  pass "fm-pr-merge refuses a stacked merge that never confirms within the bound"
+}
+
+test_github_stacked_pr_merged_result_needs_the_pr_to_read_merged() {
+  local case_dir rc
+  case_dir=$(make_case github-stack-result-only)
+  mkdir -p "$case_dir/wt"
+  add_stack_refusal_case "$case_dir" "$PENDING_BODY" "$MERGED_RESULT"
+  write_github_outcome "$case_dir" OPEN false false main
+
+  set +e
+  FM_PR_GITHUB_ASYNC_POLL_DELAY=0 run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-stack-result-only: a result alone must not prove the merge"
+  assert_grep 'state=OPEN, merged=false' "$case_dir/stderr" \
+    "github-stack-result-only: the contradicting read-back was not named"
+  assert_no_grep 'verified: ' "$case_dir/stdout" \
+    "github-stack-result-only: a result-only merge was reported as verified"
+  pass "fm-pr-merge needs the pull request itself to read merged after an async result"
+}
+
+test_github_stacked_pr_refuses_unsupported_args_and_away() {
+  local case_dir rc
+  case_dir=$(make_case github-stack-extra-args)
+  mkdir -p "$case_dir/wt"
+  add_stack_refusal_case "$case_dir" "$PENDING_BODY" "$MERGED_RESULT"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 --attended-override -- --delete-branch \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-stack-extra-args: an untranslatable flag must refuse"
+  assert_grep 'extra merge arguments beyond a merge method' "$case_dir/stderr" \
+    "github-stack-extra-args: the refusal did not name the unsupported arguments"
+  assert_no_grep 'merge-async' "$case_dir/gh.log" \
+    "github-stack-extra-args: the async API was called with arguments it cannot carry"
+
+  case_dir=$(make_case github-stack-away)
+  mkdir -p "$case_dir/wt"
+  add_stack_refusal_case "$case_dir" "$PENDING_BODY" "$MERGED_RESULT"
+  write_away_record "$case_dir" --words 'merge task-x1 when green'
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "github-stack-away: an async merge must be refused while away"
+  assert_grep 'refused while the away-posture record exists' "$case_dir/stderr" \
+    "github-stack-away: the refusal did not explain the away restriction"
+  assert_no_grep 'merge-async' "$case_dir/gh.log" \
+    "github-stack-away: the async API was called while away"
+  pass "fm-pr-merge refuses a stacked merge with untranslatable arguments or while away"
+}
+
+test_github_other_merge_failures_never_use_the_async_api() {
+  local case_dir rc
+  case_dir=$(make_case github-nonstack-failure)
+  mkdir -p "$case_dir/wt"
+  add_stack_refusal_case "$case_dir" "$PENDING_BODY" "$MERGED_RESULT"
+  printf 'GraphQL: Pull request is not mergeable (mergePullRequest)\n' > "$case_dir/github-merge-output"
+  write_github_outcome "$case_dir" OPEN false false main
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-nonstack-failure: an ordinary merge failure must still fail"
+  assert_grep 'not mergeable' "$case_dir/stderr" \
+    "github-nonstack-failure: the original forge error was masked"
+  assert_no_grep 'merge-async' "$case_dir/gh.log" \
+    "github-nonstack-failure: the async API was used for a non-stack refusal"
+  pass "fm-pr-merge uses the async API only for GitHub's stack refusal"
+}
+
 test_verified_merge_records_pr_and_head
 test_pr_metadata_is_recorded_before_the_forge_call
 test_merge_failure_propagates_after_recording
@@ -2954,6 +3198,14 @@ test_github_without_gh_failed_read_keeps_bookkeeping
 test_github_merged_outcome_is_verified
 test_github_verified_merge_requires_poll_recording
 test_github_queued_outcome_is_verified
+test_github_stacked_pr_merges_through_the_async_api
+test_github_stacked_pr_passes_the_callers_merge_method
+test_github_stacked_pr_head_moved_refuses
+test_github_stacked_pr_rejected_request_refuses
+test_github_stacked_pr_never_confirming_is_not_merged
+test_github_stacked_pr_merged_result_needs_the_pr_to_read_merged
+test_github_stacked_pr_refuses_unsupported_args_and_away
+test_github_other_merge_failures_never_use_the_async_api
 test_github_queue_required_refusal_names_retry_flags
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge
