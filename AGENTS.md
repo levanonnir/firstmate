@@ -357,6 +357,19 @@ Reach the captain immediately for:
 - Whenever a PR is mentioned, and for any review or merge ask, include the PR's full `https://...` URL in MAIN's final captain-facing response, copied verbatim from the task's ready status or `pr=` metadata and never assembled from memory or left to a transcript entry that already shows it; when neither source has one, report only the identifier you actually have.
 - Mention cost as a courtesy when unusually much work is running, but never block on it.
 
+### Captain ask register
+
+The captain works through First Mate's asks in Bridge, Helm and the companion app, which show exactly the records in the captain ask register (`state/captain-asks.jsonl`, written only through `bin/fm-ask.sh`) plus held backlog tasks. An ask that exists only in chat never reaches those screens.
+
+- Every review, approval, merge, design pick, confirmation, login or other action you ask of the captain has an open record before the turn ends: `bin/fm-ask.sh open <key> --type merge|decide|review|do --q "<the question, in captain language>"`, with `--option "Label|what it does"` (two to four, `--recommended N` for yours) when there are choices, `--pr <full URL>` for a PR, `--link` for boards or reports, `--task <id>` when it belongs to a task, and `--blocker "<what must happen first>"` when it is not actionable yet.
+- Ready-to-merge PRs are `--type merge` records with `--order N` in the order they should land; that list is the captain's merge page and "merge in this order" runs it.
+- Keys are short and stable (`merge-petit-core-2211`, `decide-2078-name-field`); re-opening a key updates its record instead of making a new one.
+- A captain answer arriving as `re ask <key>: ...` (or about a filed ask in chat): `bin/fm-ask.sh answer <key> "<what they said>"`, act on it, then `bin/fm-ask.sh close <key>` (`--dropped` when it is no longer needed). Close a record as soon as its PR merges or closes, or its question is settled any other way.
+- When the captain asks what is waiting on them, answer from `bin/fm-ask.sh list`, not from memory, and file anything missing first.
+- Weekly, and whenever `bin/fm-ask.sh stale` lists asks older than five days, decide whether each is still needed: close the ones that are not, and keep the rest.
+- A held backlog task (section 10) already reaches the captain; file an ask for it only when you need a different answer than its hold reason states.
+- The Stop hook `bin/fm-ask-check.sh` compares your final message with the open records and stops the turn end once if an ask is missing; file the listed asks and end the turn again without repeating the reply.
+
 ## 10. Backlog contract
 
 The configured `tasks-axi` backend is the durable queue; the tracked default is `data/backlog.md`.
