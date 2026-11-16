@@ -1002,6 +1002,29 @@ fm_backend_herdr_projection_target_tab_mutation_allowed() {  # <session> <tab-id
   return 1
 }
 
+# fm_backend_herdr_projection_vacate_viewed_tab: when the captain's live
+# Herdr client is showing the exact tab teardown is about to close, move the
+# view to the projection's parent (home) workspace first. The tab is going
+# away anyway, so landing him on home is the honest outcome; refusing instead
+# left the worker open and filed a "please switch away" card every time
+# (captain, 2026-11-16). Any ambiguity leaves focus untouched, so the
+# close-time guard below still refuses exactly as before.
+fm_backend_herdr_projection_vacate_viewed_tab() {  # <session> <tab-id> <parent-workspace-id>
+  local session=$1 target_tab=$2 parent_ws=$3 foreground_rc=0 focus home_tab
+  [ -n "$target_tab" ] && [ -n "$parent_ws" ] || return 0
+  fm_backend_herdr_foreground_client_present "$session" || foreground_rc=$?
+  [ "$foreground_rc" -eq 0 ] || return 0
+  focus=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 0
+  [ "${focus#*$'\t'}" = "$target_tab" ] || return 0
+  [ "${focus%%$'\t'*}" != "$parent_ws" ] || return 0
+  home_tab=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null | jq -r --arg ws "$parent_ws" '
+    [.result.workspaces[]? | select(.workspace_id == $ws) | .active_tab_id]
+    | select(length == 1) | .[0] // empty
+  ' 2>/dev/null)
+  [ -n "$home_tab" ] && [ "$home_tab" != "$target_tab" ] || return 0
+  fm_backend_herdr_cli "$session" tab focus "$home_tab" >/dev/null 2>&1 || true
+}
+
 # fm_backend_herdr_projection_close_pane_focus_preserving: close one exact
 # response-derived projection pane without leaving the captain focused
 # anywhere else.
