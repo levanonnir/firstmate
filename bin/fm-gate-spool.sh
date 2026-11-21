@@ -170,12 +170,12 @@ normalize_intent() { # <payload-file> <args...> -> NORM_ARGS array
 find_open_by_key() { # <key> <project> <branch> <read-only:0|1>
   local state dir id
   for state in queued claimed "done"; do
-    [ "$state" != done ] || [ "$4" -eq 0 ] || continue
+    [ "$state" != "done" ] || [ "$4" -eq 0 ] || continue
     for dir in "$SPOOL/$state"/*; do
       [ -d "$dir" ] && [ -f "$dir/key" ] || continue
       [ "$(cat "$dir/key")" = "$1" ] || continue
       id=$(basename "$dir")
-      [ "$state" != done ] || ! has_newer_request "$id" "$2" "$3" || continue
+      [ "$state" != "done" ] || ! has_newer_request "$id" "$2" "$3" || continue
       printf '%s\n' "$id"; return 0
     done
   done
@@ -217,7 +217,7 @@ sync_branch() { # <branch> <request-sha> <origin-head-at-queue-time, or ? when u
 }
 
 cmd_nm() {
-  local project= top branch sha id key tmp payload rc dir read_only before class
+  local project='' top branch sha id key tmp payload rc dir read_only before class
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --project) [ "$#" -ge 2 ] || die "--project needs a value" 64; project=$2; shift 2 ;;

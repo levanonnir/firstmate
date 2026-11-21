@@ -285,7 +285,9 @@ resend_results() {
 branch_busy() { # <route> <branch> [unstarted]: a gate-changing request for it is live (and has not started executing)
   local d
   for d in "$RUN/req/$1".*; do
-    [ -d "$d" ] && [ "$(cat "$d/branch" 2>/dev/null || true)" = "$2" ] && pid_alive "$(cat "$d/pid" 2>/dev/null || true)" || continue
+    [ -d "$d" ] || continue
+    [ "$(cat "$d/branch" 2>/dev/null || true)" = "$2" ] || continue
+    pid_alive "$(cat "$d/pid" 2>/dev/null || true)" || continue
     [ -z "${3:-}" ] || [ ! -f "$d/exec" ] || continue
     return 0
   done
