@@ -15,7 +15,7 @@
 # through fm-on.sh, so the primary reaches out over the existing SSH route and
 # the remote host never gets any access to this machine. A sleeping or offline
 # primary simply stops polling: requests stay queued on the remote host and are
-# served in order when it returns. There is no fallback to the remote host.
+# served in order, one request at a time per branch, when it returns. There is no fallback to the remote host.
 #
 # Per request the runner validates it again (project clone present under
 # projects/, branch inside the project's registered ship-branch prefix, verb and
@@ -65,16 +65,25 @@ routes() {
   sed -e 's/#.*//' -e 's/[[:space:]]*$//' -e 's/^[[:space:]]*//' "$CONFIG/gate-relay" | grep -v '^$' || true
 }
 
-route_host() {
+route_field() { # <id> <host|projects>
   local line
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in '- '*) ;; *) continue ;; esac
     secondmate_registry_parse_line "$line" || continue
     if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ] && [ "$SECONDMATE_REGISTRY_ID" = "$1" ]; then
-      printf '%s\n' "$SECONDMATE_REGISTRY_HOST"
+      case "$2" in host) printf '%s\n' "$SECONDMATE_REGISTRY_HOST" ;; projects) printf '%s\n' "$SECONDMATE_REGISTRY_PROJECTS" ;; esac
       return 0
     fi
   done < "$DATA/secondmates.md"
+  return 1
+}
+
+route_host() { route_field "$1" host; }
+
+route_serves_project() { # <id> <project>
+  local entry
+  entry=$(route_field "$1" projects) || return 1
+  case ",$(printf '%s' "$entry" | tr -d '[:space:]')," in *",$2,"*) return 0 ;; esac
   return 1
 }
 
@@ -88,15 +97,16 @@ inflight_count() {
   printf '%s\n' "$n"
 }
 
-with_lock() { # <name> <command...>
-  local lock="$RUN/lock-$1" i=0 rc
+with_lock() { # <name> <command...>; the lock belongs to the request in $REQ_DIR
+  local lock="$RUN/lock-$1" i=0 rc owner
   shift
   while ! mkdir "$lock" 2>/dev/null; do
-    if ! pid_alive "$(cat "$lock/pid" 2>/dev/null || true)" && [ "$i" -ge 3 ]; then rm -rf -- "$lock"; continue; fi
+    owner=$(cat "$lock/owner" 2>/dev/null || true)
+    if ! pid_alive "$(cat "$owner/pid" 2>/dev/null || true)" && [ "$i" -ge 3 ]; then rm -rf -- "$lock"; continue; fi
     i=$((i + 1)); [ "$i" -lt 600 ] || return 1
     sleep 0.2
   done
-  printf '%s\n' "$$" > "$lock/pid"
+  printf '%s\n' "$REQ_DIR" > "$lock/owner"
   rc=0; "$@" || rc=$?
   rm -rf -- "$lock"
   return "$rc"
@@ -145,10 +155,16 @@ ensure_clone() { # <project> <origin> -> prints the clone path
   printf '%s\n' "$clone"
 }
 
+add_worktree() { # <clone> <project> <branch> <wt> <sha>
+  mkdir -p "$RUN/wt/$2"
+  git -C "$1" worktree prune
+  git -C "$1" worktree add --quiet -B "$3" "$4" "$5"
+}
+
 prepare_worktree() { # <project> <branch> <sha> <route> <repo> <need-run> -> prints worktree path
   local project=$1 branch=$2 sha=$3 route=$4 repo=$5 need_run=$6 origin clone slug wt host ssh_cmd
   origin=$(git -C "$FM_HOME/projects/$project" remote get-url origin 2>/dev/null) || { echo "project $project has no clone with an origin on the primary" >&2; return 64; }
-  clone=$(ensure_clone "$project" "$origin") || { echo "could not prepare the primary's gate clone for $project" >&2; return 70; }
+  clone=$(with_lock "clone-$project" ensure_clone "$project" "$origin") || { echo "could not prepare the primary's gate clone for $project" >&2; return 70; }
   slug=$(printf '%s' "$branch" | tr -c 'A-Za-z0-9._-' '-')-$(printf '%s' "$branch" | { shasum 2>/dev/null || sha1sum; } | cut -c1-8)
   wt="$RUN/wt/$project/$slug"
   if [ "$need_run" = 1 ]; then
@@ -158,10 +174,13 @@ prepare_worktree() { # <project> <branch> <sha> <route> <repo> <need-run> -> pri
       || { echo "could not fetch $branch from $route" >&2; return 70; }
     git -C "$clone" cat-file -e "$sha^{commit}" 2>/dev/null || { echo "the worker branch no longer holds $sha" >&2; return 70; }
     if [ ! -d "$wt" ]; then
-      mkdir -p "$RUN/wt/$project"
-      git -C "$clone" worktree prune
-      git -C "$clone" worktree add --quiet -B "$branch" "$wt" "$sha" >&2 || return 70
+      with_lock "clone-$project" add_worktree "$clone" "$project" "$branch" "$wt" "$sha" >&2 || return 70
     elif ! git -C "$wt" merge-base --is-ancestor "$sha" HEAD 2>/dev/null; then
+      if git -C "$clone" fetch --quiet origin "+refs/heads/$branch:refs/gate-origin/$slug" 2>/dev/null \
+        && git -C "$clone" merge-base --is-ancestor "$sha" "refs/gate-origin/$slug" 2>/dev/null; then
+        echo "the pipeline already pushed a newer head for $branch than $sha; sync your branch to origin before running again" >&2
+        return 70
+      fi
       git -C "$wt" checkout --quiet -B "$branch" "$sha" >&2 || return 70
       git -C "$wt" reset --quiet --hard "$sha" >&2 || return 70
     fi
@@ -182,7 +201,7 @@ send_result() { # <route> <id> <request-dir>
 
 run_request() { # <route> <id> <request-dir>; runs detached or inline
   local route=$1 id=$2 dir=$3 spec project branch sha repo prefix need_run=0 wt rc
-  echo "${BASHPID:-$$}" > "$dir/pid"
+  REQ_DIR=$dir
   if ! spec=$(spool "$route" show "$id" 2>/dev/null); then
     log "cannot read request $id from $route; leaving it claimed for reconciliation"
     rm -rf -- "$dir"
@@ -204,6 +223,8 @@ run_request() { # <route> <id> <request-dir>; runs detached or inline
       case "$sha" in ''|*[!0-9a-f]*) prefix= ;; esac
       if [ -z "$prefix" ] || [ -z "$branch" ]; then
         fail_request "$dir" 64 "refused: branch, repo, or head outside this project's registered ship-branch prefix"
+      elif ! route_serves_project "$route" "$project"; then
+        fail_request "$dir" 64 "refused: project $project is not among the projects registered for route $route"
       else
         [ "${REQ_ARGS[0]}:${REQ_ARGS[1]:-}" = axi:run ] && need_run=1
         rc=0
@@ -252,6 +273,14 @@ resend_results() {
   done
 }
 
+branch_busy() { # <route> <branch>: a request for it is already running
+  local d
+  for d in "$RUN/req/$1".*; do
+    [ -d "$d" ] && [ "$(cat "$d/branch" 2>/dev/null || true)" = "$2" ] && pid_alive "$(cat "$d/pid" 2>/dev/null || true)" && return 0
+  done
+  return 1
+}
+
 poll_route() { # <route>
   local route=$1 listing id project branch dir
   if ! listing=$(spool "$route" pending 2>/dev/null); then
@@ -261,9 +290,11 @@ poll_route() { # <route>
   while IFS=$'\t' read -r id project branch; do
     [ -n "$id" ] || continue
     [ "$(inflight_count)" -lt "$MAX_INFLIGHT" ] || { log "at the concurrency limit; $id stays queued"; break; }
+    branch_busy "$route" "$branch" && continue
     spool "$route" claim "$id" "$RUNNER_ID" >/dev/null 2>&1 || continue
     dir="$RUN/req/$route.$id"
     mkdir -p "$dir"
+    printf '%s\n' "$branch" > "$dir/branch"
     run_request "$route" "$id" "$dir" &
     echo "$!" > "$dir/pid"
   done <<EOF

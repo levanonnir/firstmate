@@ -694,11 +694,12 @@ This home's no-mistakes validation runs on the primary machine, not on this host
 Never run \`no-mistakes\` here, including \`doctor\` and \`init\`: the primary builds, tests, reviews, and pushes your branch.
 Wherever you would run \`no-mistakes <args>\`, run this from your task worktree with your branch committed, with the same arguments:
 \`$GATE_CMD <args>\`
-Its output and exit status are the gate's own, so drive it exactly as the pipeline guidance describes, in the background with a \`paused:\` declaration for the wait.
+Its output and exit status are the gate's own, so drive it exactly as the pipeline guidance describes; that guidance, not this section, sets how you wait.
+The daemon runs on the primary and \`no-mistakes daemon status\` is not available here: where rule 7 asks for it, check only through \`axi status\`, and report a daemon error only when that result itself shows one.
 Only \`axi run\`, \`respond\`, \`answer\`, \`status\`, \`abort\`, \`retry\`, \`rounds\`, \`logs\`, \`handoff\`, \`runs\`, and the top-level \`status\` are available, and \`--yes\` stays banned.
 When the primary is asleep or offline the request waits in a durable queue and runs when it returns; there is no fallback to this host, so never run the gate here and never abandon the wait.
 Running the identical command again reattaches to the same request instead of duplicating it.
-After each result the tool fast-forwards your branch to the head the pipeline pushed, so commit nothing yourself after the run starts.
+After each result the tool moves your branch to the head the pipeline pushed (the pipeline may rebase it), so commit nothing yourself after the run starts.
 EOF
 fi
 RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1

@@ -197,6 +197,66 @@ wait "$C7B"; assert_equals 75 "$?" "an answer that may have been applied is fail
 assert_contains "$(cat "$TMP_ROOT/c7b.err")" "before confirming" "expected text"
 pass "a request orphaned by a dead runner is re-served when safe and failed when not"
 
+# --- 9. A project outside the route's registered projects is refused -----------
+git clone -q "$ORIGIN" "$MAC/projects/other-proj"
+printf '%s\n' '- other-proj [no-mistakes] - other (added 2026-08-12)' >> "$MAC/data/projects.md"
+( cd "$WT" && env PATH="$TRAP_BIN:$PATH" FM_HOME="$REMOTE" FM_GATE_POLL=0.2 "$SB/bin/fm-gate-spool.sh" nm --project other-proj -- axi run ) > "$TMP_ROOT/c9.out" 2> "$TMP_ROOT/c9.err" &
+C9=$!
+wait_for queued_is 1 || fail "foreign-project request was not queued"
+runner once 2>/dev/null
+wait "$C9"; assert_equals 64 "$?" "foreign project exit status"
+assert_contains "$(cat "$TMP_ROOT/c9.err")" "not among the projects registered" "expected text"
+pass "the primary refuses a project the route is not registered for"
+
+# --- 10. A stale unread result never satisfies a later gate ----------------------
+# exec makes $! the script itself, so killing it leaves its finished result unread.
+orphan_client() { ( cd "$WT" && exec env PATH="$TRAP_BIN:$PATH" FM_HOME="$REMOTE" FM_GATE_POLL=30 "$SB/bin/fm-gate-spool.sh" nm --project petit-core -- "$@" ) > /dev/null 2>&1; }
+done_count() { find "$REMOTE/state/gate-spool/done" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' '; }
+done_is() { [ "$(done_count)" = "$1" ]; }
+orphan_client axi respond --action approve &
+O1=$!
+wait_for queued_is 1 || fail "stale-answer fixture: respond not queued"
+runner once 2>/dev/null
+wait_for done_is 1 || fail "stale-answer fixture: respond did not finish"
+kill -9 "$O1" 2>/dev/null; wait "$O1" 2>/dev/null || true
+client axi status > /dev/null 2>&1 &
+S1=$!
+wait_for queued_is 1 || fail "a request after the stale answer was not queued"
+runner once 2>/dev/null
+wait "$S1"
+RESPONDS_BEFORE=$(grep -c '|axi respond --action approve|' "$NM_LOG")
+client axi respond --action approve > "$TMP_ROOT/c10.out" 2> "$TMP_ROOT/c10.err" &
+C10=$!
+wait_for queued_is 1 || fail "the next gate's answer must be queued, not satisfied by the stale result (got: $(cat "$TMP_ROOT/c10.err"))"
+runner once 2>/dev/null
+wait "$C10"
+assert_equals "$((RESPONDS_BEFORE + 1))" "$(grep -c '|axi respond --action approve|' "$NM_LOG")" "the new answer must reach the primary"
+rm -rf "$REMOTE/state/gate-spool/done"/*
+orphan_client axi status &
+O2=$!
+wait_for queued_is 1 || fail "read fixture: status not queued"
+runner once 2>/dev/null
+wait_for done_is 1 || fail "read fixture: status did not finish"
+kill -9 "$O2" 2>/dev/null; wait "$O2" 2>/dev/null || true
+client axi status > /dev/null 2>&1 &
+S2=$!
+wait_for queued_is 1 || fail "a repeated read must run fresh, not reattach to a finished result"
+runner once 2>/dev/null
+wait "$S2"
+pass "a finished unread result is not reattached to a later gate or to a read"
+
+# --- 11. The pipeline rebased the branch: the worker follows it ------------------
+OLD_HEAD=$(git -C "$WT" rev-parse HEAD)
+REBASED=$(git -C "$WT" commit-tree -p "$(git -C "$WT" rev-parse "$OLD_HEAD~1")" -m rebased "$(git -C "$WT" rev-parse "$OLD_HEAD^{tree}")")
+git -C "$WT" push -q --force origin "$REBASED:refs/heads/fm/t1"
+client axi status > /dev/null 2>&1 &
+S3=$!
+wait_for queued_is 1 || fail "rebase fixture: status not queued"
+runner once 2>/dev/null
+wait "$S3"
+assert_equals "$REBASED" "$(git -C "$WT" rev-parse HEAD)" "worker follows a rebased pipeline head"
+pass "a worker still at the requested head follows a rebased pipeline head"
+
 # --- 8. Service definition ----------------------------------------------------------
 PLIST=$(runner install --print)
 assert_contains "$PLIST" "dev.firstmate.gate-runner" "expected text"

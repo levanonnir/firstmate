@@ -2,7 +2,7 @@
 # Durable gate-request queue for a home whose no-mistakes validation runs on its primary.
 #
 # Usage (worker, inside its own task worktree):
-#   fm-gate-spool.sh nm [--project <name>] -- <no-mistakes args...>
+#   fm-gate-spool.sh nm --project <name> -- <no-mistakes args...>
 # Usage (the primary's gate runner, through fm-on.sh; FM_HOME is the remote home):
 #   fm-gate-spool.sh pending
 #   fm-gate-spool.sh claimed <runner>
@@ -23,10 +23,11 @@
 # every --intent form into one stdin payload, queues the request for the current
 # branch and HEAD, and blocks until the runner has finished it, then prints the
 # runner's stdout, stderr, and exit status unchanged. An identical request that is
-# still queued, claimed, or finished but undelivered is reattached rather than
-# duplicated, so a killed or re-run wait never answers a gate twice. After every
-# delivery it fast-forwards the worker's branch to the pipeline-pushed origin
-# head when that is safe.
+# still queued or claimed is reattached rather than duplicated; a finished but
+# unread one is reattached too, unless it is a read verb or a later request exists
+# for the branch, so a killed or re-run wait never answers a gate twice and a stale
+# answer never stands in for a later gate. After every delivery it moves the
+# worker's branch to the pipeline-pushed origin head when that is safe.
 set -eu
 
 FM_HOME="${FM_HOME:?FM_HOME is required}"
@@ -129,27 +130,50 @@ normalize_intent() { # <payload-file> <args...> -> NORM_ARGS array
   [ "$(wc -c < "$payload" | tr -d ' ')" -le "$MAX_PAYLOAD" ] || die "intent exceeds the $MAX_PAYLOAD-byte bound" 64
 }
 
-find_open_by_key() { # <key>
-  local state dir
+# A request that is queued or claimed is reattached. A finished, unread one is
+# reattached only for a verb that changes the gate (never a read) and only while no
+# later request exists for the same branch, so a stale answer cannot stand in for
+# the next gate's.
+find_open_by_key() { # <key> <project> <branch> <read-only:0|1>
+  local state dir id
   for state in queued claimed "done"; do
+    [ "$state" != done ] || [ "$4" -eq 0 ] || continue
     for dir in "$SPOOL/$state"/*; do
       [ -d "$dir" ] && [ -f "$dir/key" ] || continue
-      if [ "$(cat "$dir/key")" = "$1" ]; then basename "$dir"; return 0; fi
+      [ "$(cat "$dir/key")" = "$1" ] || continue
+      id=$(basename "$dir")
+      [ "$state" != done ] || ! has_newer_request "$id" "$2" "$3" || continue
+      printf '%s\n' "$id"; return 0
+    done
+  done
+  return 1
+}
+
+has_newer_request() { # <id> <project> <branch>
+  local state dir
+  for state in queued claimed "done" delivered; do
+    for dir in "$SPOOL/$state"/*; do
+      [ -d "$dir" ] && [ "$(basename "$dir")" != "$1" ] || continue
+      [ "$(meta_get "$dir" project)" = "$2" ] && [ "$(meta_get "$dir" branch)" = "$3" ] || continue
+      [ "$(basename "$dir")" \> "$1" ] && return 0
     done
   done
   return 1
 }
 
 # Fast-forward the worker's branch to the head the primary's pipeline pushed.
-sync_branch() { # <branch>
-  local branch=$1 fetched
+# The pipeline rebases the branch, so its head may not descend from the head the
+# request was made at; a copy still at that head follows it.
+sync_branch() { # <branch> <request-sha>
+  local branch=$1 sent=$2 fetched head
   git fetch --quiet origin "refs/heads/$branch" 2>/dev/null || return 0
   fetched=$(git rev-parse FETCH_HEAD 2>/dev/null) || return 0
-  [ "$fetched" != "$(git rev-parse HEAD)" ] || return 0
-  if git merge-base --is-ancestor HEAD "$fetched" 2>/dev/null; then
+  head=$(git rev-parse HEAD)
+  [ "$fetched" != "$head" ] || return 0
+  if git merge-base --is-ancestor HEAD "$fetched" 2>/dev/null || { [ "$head" = "$sent" ] && ! git merge-base --is-ancestor "$fetched" HEAD 2>/dev/null; }; then
     if git diff --quiet && git diff --cached --quiet; then
-      git merge --ff-only --quiet "$fetched" >/dev/null 2>&1 \
-        && printf 'fm-gate: branch %s fast-forwarded to the pipeline head %s\n' "$branch" "$fetched" >&2
+      git reset --hard --quiet "$fetched" >/dev/null 2>&1 \
+        && printf 'fm-gate: branch %s moved to the pipeline head %s\n' "$branch" "$fetched" >&2
     else
       printf 'fm-gate: pipeline pushed %s but this copy has uncommitted changes; commit or discard them and sync\n' "$fetched" >&2
     fi
@@ -159,7 +183,7 @@ sync_branch() { # <branch>
 }
 
 cmd_nm() {
-  local project=${FM_GATE_PROJECT:-} top branch sha id key tmp payload rc dir
+  local project= top branch sha id key tmp payload rc dir read_only
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --project) [ "$#" -ge 2 ] || die "--project needs a value" 64; project=$2; shift 2 ;;
@@ -167,7 +191,7 @@ cmd_nm() {
       *) break ;;
     esac
   done
-  valid_name "$project" || die "name the project with --project <name> or FM_GATE_PROJECT" 64
+  valid_name "$project" || die "name the project with --project <name>" 64
   check_nm_args "$@"
   top=$(git rev-parse --show-toplevel 2>/dev/null) || die "run this from inside your task worktree" 64
   branch=$(git symbolic-ref --short HEAD 2>/dev/null) || die "HEAD is detached; check out your task branch" 64
@@ -177,7 +201,9 @@ cmd_nm() {
   payload="$tmp/stdin"
   normalize_intent "$payload" "$@"
   key=$({ printf '%s\0%s\0%s\0' "$project" "$branch" "$sha"; printf '%s\0' "${NORM_ARGS[@]}"; cat "$payload"; } | sha256)
-  if id=$(find_open_by_key "$key"); then
+  read_only=0
+  case "${NORM_ARGS[0]}:${NORM_ARGS[1]:-}" in axi:status|axi:logs|axi:rounds|runs:*|status:*) read_only=1 ;; esac
+  if id=$(find_open_by_key "$key" "$project" "$branch" "$read_only"); then
     rm -rf -- "$tmp"
     printf 'fm-gate: reattached to request %s (waiting for the primary'"'"'s gate runner; no local fallback)\n' "$id" >&2
   else
@@ -203,7 +229,7 @@ cmd_nm() {
       cat "$dir/out"
       cat "$dir/err" >&2
       [ "$dir" = "$SPOOL/delivered/$id" ] || mv "$dir" "$SPOOL/delivered/$id" 2>/dev/null || true
-      sync_branch "$branch"
+      sync_branch "$branch" "$sha"
       exit "$rc"
     done
     sleep "$POLL"

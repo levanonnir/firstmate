@@ -641,7 +641,7 @@ The primary reaches out; the remote host never gets any access to the primary.
 2. `bin/fm-gate-runner.sh` on the primary polls each route named in `config/gate-relay` through `fm-on.sh`, claims a request, and fetches the worker's branch from the remote worktree over SSH with forwarding disabled.
 3. The runner keeps one clone per project and one worktree per branch under `state/gate-runner/`, initializes the gate there, and runs the same `no-mistakes` arguments in that worktree.
 4. The runner sends the stdout, stderr, and exit status back as the request's result, and the worker's command prints them unchanged.
-5. After each result the worker's command fast-forwards the worker's branch to the head the pipeline pushed to the forge, when its copy is clean.
+5. After each result the worker's command moves the worker's branch to the head the pipeline pushed to the forge, when its copy is clean and still at the head the request was made at or behind the pushed head (the pipeline rebases, so the pushed head need not descend from it).
 
 A request is a directory that moves by atomic rename through `queued`, `claimed`, `done`, and `delivered`.
 [`bin/fm-gate-spool.sh`](../bin/fm-gate-spool.sh) owns that queue, the verb allowlist, and the `--yes` ban.
@@ -650,11 +650,12 @@ A request is a directory that moves by atomic rename through `queued`, `claimed`
 ### Offline primary and no fallback
 
 When the primary is asleep, offline, or unreachable, nothing runs anywhere: requests stay queued in the remote home and the worker's command keeps waiting.
-When the primary returns, the runner serves them in order.
+When the primary returns, the runner serves them in order, one request at a time per branch.
 The remote host never runs the pipeline as a fallback, and the worker brief says so.
 The runner's LaunchAgent is frozen by sleep and resumes on wake, so no request is lost across it.
 
-An identical request that is still queued, running, or finished but not yet read is reattached, so a killed wait or a repeated command never answers a gate twice.
+An identical request that is still queued or running is reattached, so a killed wait or a repeated command never answers a gate twice.
+A finished but unread result is reattached too, except for read verbs (`axi status`, `axi logs`, `axi rounds`, `runs`, `status`) and except once a later request exists for the same branch, so a stale answer never satisfies a later gate.
 A result that cannot be sent back is kept and re-sent on later polls.
 A request left claimed by a dead runner is released when it never started or is safe to repeat (`axi run`, `axi status`, `axi logs`, `axi rounds`, `runs`, `status`).
 An answer that may already have been applied is failed with exit 75 rather than sent twice, and the worker checks the gate state before answering again.
@@ -666,6 +667,7 @@ The runner trusts nothing in a request:
 - Only the `axi` drive verbs, `runs`, and `status` run, and `--yes` is refused, through the same check the worker side uses.
 - The project must have a clone under the primary's `projects/` whose origin the runner reads itself.
   A request never supplies an origin.
+- The project must be listed in the route's `projects:` field in `data/secondmates.md`.
 - The branch must start with the project's registered ship-branch prefix.
 - The fetch uses the SSH alias recorded for the route in `data/secondmates.md`.
 
@@ -692,6 +694,8 @@ The primary's no-mistakes version, configuration, and agent govern the run.
   Abort it through `fm-gate-spool.sh nm -- axi abort` from the worktree first.
 - Only the output the runner returns is visible to the worker; each stream is capped at 200,000 bytes.
 - `direct-PR` and `local-only` tasks are unaffected and never use the relay.
+- `forge=gerrit` is not supported: the relay refuses `axi sync`, which a Gerrit no-mistakes task needs to finish.
+- Worktrees and `refs/gate` refs under `state/gate-runner/` grow with each task branch and are not cleaned up; pruning them is a known follow-up.
 
 ## Sync, update, and retirement
 
