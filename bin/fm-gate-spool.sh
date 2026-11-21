@@ -56,6 +56,37 @@ meta_get() { # <request-dir> <key>
   sed -n "s/^$2=//p" "$1/meta" | head -n 1
 }
 
+# serial: changes the gate, one at a time per branch; abort; read: reports state only.
+verb_class() { # <verb[:subverb]>
+  case "$1" in
+    axi:run|axi:respond|axi:answer|axi:retry|axi:handoff) echo serial ;;
+    axi:abort) echo abort ;;
+    axi:status|axi:logs|axi:rounds|runs|runs:*|status|status:*) echo read ;;
+    *) echo other ;;
+  esac
+}
+
+request_class() { # <request-dir>
+  verb_class "$(tr '\0' '\n' < "$1/argv" | head -n 2 | paste -sd : -)"
+}
+
+# An abort cancels this branch's gate-changing requests that are still queued, so a
+# torn-down task never starts its pipeline once the primary is back.
+cancel_queued_serial() { # <project> <branch>
+  local dir id hold
+  for dir in "$SPOOL/queued"/*; do
+    [ -d "$dir" ] || continue
+    [ "$(meta_get "$dir" project)" = "$1" ] && [ "$(meta_get "$dir" branch)" = "$2" ] || continue
+    [ "$(request_class "$dir")" = serial ] || continue
+    id=$(basename "$dir"); hold="$SPOOL/.cancel-$id"
+    mv "$dir" "$hold" 2>/dev/null || continue
+    : > "$hold/out"
+    printf 'fm-gate: request %s was cancelled by a later axi abort before it started\n' "$id" > "$hold/err"
+    printf '75\n' > "$hold/rc"
+    mv "$hold" "$SPOOL/done/$id"
+  done
+}
+
 find_request() { # <id> -> prints the request directory
   local state
   for state in queued claimed "done" delivered; do
@@ -184,7 +215,7 @@ sync_branch() { # <branch> <request-sha> <origin-head-at-queue-time, or ? when u
 }
 
 cmd_nm() {
-  local project= top branch sha id key tmp payload rc dir read_only before
+  local project= top branch sha id key tmp payload rc dir read_only before class
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --project) [ "$#" -ge 2 ] || die "--project needs a value" 64; project=$2; shift 2 ;;
@@ -202,8 +233,10 @@ cmd_nm() {
   payload="$tmp/stdin"
   normalize_intent "$payload" "$@"
   key=$({ printf '%s\0%s\0%s\0' "$project" "$branch" "$sha"; printf '%s\0' "${NORM_ARGS[@]}"; cat "$payload"; } | sha256)
+  class=$(verb_class "${NORM_ARGS[0]}:${NORM_ARGS[1]:-}")
   read_only=0
-  case "${NORM_ARGS[0]}:${NORM_ARGS[1]:-}" in axi:status|axi:logs|axi:rounds|runs:*|status:*) read_only=1 ;; esac
+  [ "$class" != read ] || read_only=1
+  [ "$class" != abort ] || cancel_queued_serial "$project" "$branch"
   if id=$(find_open_by_key "$key" "$project" "$branch" "$read_only"); then
     rm -rf -- "$tmp"
     printf 'fm-gate: reattached to request %s (waiting for the primary'"'"'s gate runner; no local fallback)\n' "$id" >&2
@@ -257,7 +290,7 @@ cmd_pending() {
   local dir
   for dir in "$SPOOL/queued"/*; do
     [ -d "$dir" ] || continue
-    printf '%s\t%s\t%s\t%s\n' "$(basename "$dir")" "$(meta_get "$dir" project)" "$(meta_get "$dir" branch)" "$(tr '\0' '\n' < "$dir/argv" | head -n 2 | paste -sd : -)"
+    printf '%s\t%s\t%s\t%s\n' "$(basename "$dir")" "$(meta_get "$dir" project)" "$(meta_get "$dir" branch)" "$(request_class "$dir")"
   done | sort
 }
 

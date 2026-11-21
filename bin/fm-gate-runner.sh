@@ -16,7 +16,10 @@
 # the remote host never gets any access to this machine. A sleeping or offline
 # primary simply stops polling: requests stay queued on the remote host and are
 # served in order when it returns, one gate-changing request (axi run, respond,
-# answer, retry, handoff) at a time per branch; reads and axi abort go straight through. There is no fallback to the remote host.
+# answer, retry, handoff) at a time per branch. Reads go straight through; an
+# axi abort cancels the branch's still-queued gate-changing requests when it is
+# queued and passes a run only once that run is executing. There is no fallback
+# to the remote host.
 #
 # Per request the runner validates it again (project clone present under
 # projects/, branch inside the project's registered ship-branch prefix, verb and
@@ -278,33 +281,33 @@ resend_results() {
   done
 }
 
-serial_verb() { # <verb:subverb>: changes the gate, so runs one at a time per branch
-  case "$1" in axi:run|axi:respond|axi:answer|axi:retry|axi:handoff) return 0 ;; esac
-  return 1
-}
-
-branch_busy() { # <route> <branch>: a gate-changing request for it is already running
+branch_busy() { # <route> <branch> [unstarted]: a gate-changing request for it is live (and has not started executing)
   local d
   for d in "$RUN/req/$1".*; do
-    [ -d "$d" ] && [ "$(cat "$d/branch" 2>/dev/null || true)" = "$2" ] && pid_alive "$(cat "$d/pid" 2>/dev/null || true)" && return 0
+    [ -d "$d" ] && [ "$(cat "$d/branch" 2>/dev/null || true)" = "$2" ] && pid_alive "$(cat "$d/pid" 2>/dev/null || true)" || continue
+    [ -z "${3:-}" ] || [ ! -f "$d/exec" ] || continue
+    return 0
   done
   return 1
 }
 
 poll_route() { # <route>
-  local route=$1 listing id project branch verb dir
+  local route=$1 listing id project branch class dir
   if ! listing=$(spool "$route" pending 2>/dev/null); then
     log "route $route unreachable; its requests stay queued"
     return 0
   fi
-  while IFS=$'\t' read -r id project branch verb; do
+  while IFS=$'\t' read -r id project branch class; do
     [ -n "$id" ] || continue
     [ "$(inflight_count)" -lt "$MAX_INFLIGHT" ] || { log "at the concurrency limit; $id stays queued"; break; }
-    if serial_verb "$verb"; then branch_busy "$route" "$branch" && continue; fi
+    case "$class" in
+      serial) branch_busy "$route" "$branch" && continue ;;
+      abort) branch_busy "$route" "$branch" unstarted && continue ;;
+    esac
     spool "$route" claim "$id" "$RUNNER_ID" >/dev/null 2>&1 || continue
     dir="$RUN/req/$route.$id"
     mkdir -p "$dir"
-    if serial_verb "$verb"; then printf '%s\n' "$branch" > "$dir/branch"; fi
+    if [ "$class" = serial ]; then printf '%s\n' "$branch" > "$dir/branch"; fi
     run_request "$route" "$id" "$dir" &
     echo "$!" > "$dir/pid"
   done <<EOF

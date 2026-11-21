@@ -306,6 +306,23 @@ assert_equals "$AMENDED" "$(git -C "$WT" rev-parse HEAD)" "an unchanged origin h
 assert_contains "$(cat "$TMP_ROOT/c12s.err")" "diverged" "expected text"
 pass "a worker follows a rebase pushed during its request and keeps its own rewrites otherwise"
 
+# --- 13. An abort queued while the primary sleeps cancels the queued run ---------
+: > "$OFFLINE"
+RUNS_BEFORE=$(grep -c '|axi run' "$NM_LOG")
+client axi run --intent "torn-down task" > "$TMP_ROOT/c13r.out" 2> "$TMP_ROOT/c13r.err" &
+R13=$!
+wait_for queued_is 1 || fail "sleep fixture: run not queued"
+client axi abort > "$TMP_ROOT/c13a.out" 2>/dev/null &
+A13=$!
+wait "$R13"; assert_equals 75 "$?" "a queued run cancelled by a later abort"
+assert_contains "$(cat "$TMP_ROOT/c13r.err")" "cancelled by a later axi abort" "expected text"
+queued_is 1 || fail "only the abort should remain queued"
+rm -f "$OFFLINE"
+runner once 2>/dev/null
+wait "$A13"; assert_equals 0 "$?" "the abort is served once the primary is back"
+assert_equals "$RUNS_BEFORE" "$(grep -c '|axi run' "$NM_LOG")" "no pipeline may start for the cancelled task"
+pass "an abort queued while the primary sleeps cancels the branch's queued run"
+
 # --- 8. Service definition ----------------------------------------------------------
 PLIST=$(runner install --print)
 assert_contains "$PLIST" "dev.firstmate.gate-runner" "expected text"
