@@ -58,6 +58,13 @@ case "\$1 \$2" in
   "init --skip-user-skill") git remote add no-mistakes "\$PWD/.git"; exit 0 ;;
   "axi run")
     branch=\$(git symbolic-ref --short HEAD)
+    while [ -f "$TMP_ROOT/hold-run" ]; do sleep 0.1; done
+    if [ -f "$TMP_ROOT/rebase-run" ]; then
+      new=\$(git commit-tree -p HEAD~1 -m rebased "HEAD^{tree}")
+      git push -q -f origin "\$new:refs/heads/\$branch"
+      echo "\$new" > "$TMP_ROOT/rebased-sha"
+      echo "status: gate-reached"; exit 0
+    fi
     echo fix > pipeline-fix.txt; git add pipeline-fix.txt; git commit -qm "pipeline fix"
     git push -q origin "HEAD:refs/heads/\$branch"
     echo "status: gate-reached"; exit 0 ;;
@@ -209,16 +216,16 @@ assert_contains "$(cat "$TMP_ROOT/c9.err")" "not among the projects registered" 
 pass "the primary refuses a project the route is not registered for"
 
 # --- 10. A stale unread result never satisfies a later gate ----------------------
-# exec makes $! the script itself, so killing it leaves its finished result unread.
-orphan_client() { ( cd "$WT" && exec env PATH="$TRAP_BIN:$PATH" FM_HOME="$REMOTE" FM_GATE_POLL=30 "$SB/bin/fm-gate-spool.sh" nm --project petit-core -- "$@" ) > /dev/null 2>&1; }
+# The subshell execs the script, so ORPHAN is its pid and killing it leaves its finished result unread.
+orphan_client() { ( cd "$WT" && exec env PATH="$TRAP_BIN:$PATH" FM_HOME="$REMOTE" FM_GATE_POLL=30 "$SB/bin/fm-gate-spool.sh" nm --project petit-core -- "$@" ) > /dev/null 2>&1 & ORPHAN=$!; }
+kill_orphan() { kill -9 "$ORPHAN" 2>/dev/null; wait "$ORPHAN" 2>/dev/null || true; ! kill -0 "$ORPHAN" 2>/dev/null || fail "the orphaned waiter survived"; }
 done_count() { find "$REMOTE/state/gate-spool/done" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' '; }
 done_is() { [ "$(done_count)" = "$1" ]; }
-orphan_client axi respond --action approve &
-O1=$!
+orphan_client axi respond --action approve
 wait_for queued_is 1 || fail "stale-answer fixture: respond not queued"
 runner once 2>/dev/null
 wait_for done_is 1 || fail "stale-answer fixture: respond did not finish"
-kill -9 "$O1" 2>/dev/null; wait "$O1" 2>/dev/null || true
+kill_orphan
 client axi status > /dev/null 2>&1 &
 S1=$!
 wait_for queued_is 1 || fail "a request after the stale answer was not queued"
@@ -232,12 +239,11 @@ runner once 2>/dev/null
 wait "$C10"
 assert_equals "$((RESPONDS_BEFORE + 1))" "$(grep -c '|axi respond --action approve|' "$NM_LOG")" "the new answer must reach the primary"
 rm -rf "$REMOTE/state/gate-spool/done"/*
-orphan_client axi status &
-O2=$!
+orphan_client axi status
 wait_for queued_is 1 || fail "read fixture: status not queued"
 runner once 2>/dev/null
 wait_for done_is 1 || fail "read fixture: status did not finish"
-kill -9 "$O2" 2>/dev/null; wait "$O2" 2>/dev/null || true
+kill_orphan
 client axi status > /dev/null 2>&1 &
 S2=$!
 wait_for queued_is 1 || fail "a repeated read must run fresh, not reattach to a finished result"
@@ -245,17 +251,60 @@ runner once 2>/dev/null
 wait "$S2"
 pass "a finished unread result is not reattached to a later gate or to a read"
 
-# --- 11. The pipeline rebased the branch: the worker follows it ------------------
-OLD_HEAD=$(git -C "$WT" rev-parse HEAD)
-REBASED=$(git -C "$WT" commit-tree -p "$(git -C "$WT" rev-parse "$OLD_HEAD~1")" -m rebased "$(git -C "$WT" rev-parse "$OLD_HEAD^{tree}")")
-git -C "$WT" push -q --force origin "$REBASED:refs/heads/fm/t1"
-client axi status > /dev/null 2>&1 &
-S3=$!
-wait_for queued_is 1 || fail "rebase fixture: status not queued"
+# --- 11. Reads and abort pass a running gate; another answer waits for it ------
+: > "$TMP_ROOT/hold-run"
+client axi run > /dev/null 2>&1 &
+R11=$!
+wait_for queued_is 1 || fail "active-run fixture: run not queued"
+runner once 2>/dev/null &
+RUNNER11=$!
+wait_for grep -q '|axi run|' "$NM_LOG" || fail "active-run fixture: run did not start"
+client axi status > "$TMP_ROOT/c11s.out" 2>/dev/null &
+S11=$!
+client axi abort > "$TMP_ROOT/c11a.out" 2>/dev/null &
+A11=$!
+wait_for queued_is 2 || fail "active-run fixture: status and abort not queued"
+client axi respond --action approve > /dev/null 2>&1 &
+P11=$!
+wait_for queued_is 3 || fail "active-run fixture: respond not queued"
 runner once 2>/dev/null
-wait "$S3"
-assert_equals "$REBASED" "$(git -C "$WT" rev-parse HEAD)" "worker follows a rebased pipeline head"
-pass "a worker still at the requested head follows a rebased pipeline head"
+wait "$S11"; assert_equals 0 "$?" "a read while a run is active"
+wait "$A11"; assert_equals 0 "$?" "an abort while a run is active"
+assert_contains "$(cat "$TMP_ROOT/c11a.out")" "ok axi abort" "expected text"
+queued_is 1 || fail "a second gate-changing request must wait for the active run"
+kill -0 "$R11" 2>/dev/null || fail "the held run must still be active"
+rm -f "$TMP_ROOT/hold-run"
+wait "$RUNNER11" "$R11"
+runner once 2>/dev/null
+wait "$P11" || true
+queued_is 0 || fail "the held answer was not served after the run"
+pass "reads and abort run while a gate run is active; another answer waits"
+
+# --- 12. Following a rebasing pipeline, never a stale origin head ----------------
+: > "$TMP_ROOT/rebase-run"
+client axi run > /dev/null 2>&1 &
+S12=$!
+wait_for queued_is 1 || fail "rebase fixture: run not queued"
+runner once 2>/dev/null
+wait "$S12"
+rm -f "$TMP_ROOT/rebase-run"
+REBASED=$(cat "$TMP_ROOT/rebased-sha")
+assert_equals "$REBASED" "$(git -C "$WT" rev-parse HEAD)" "worker follows a head the pipeline rebased during the request"
+client axi run > "$TMP_ROOT/c12.out" 2> "$TMP_ROOT/c12.err" &
+S12=$!
+wait_for queued_is 1 || fail "rerun fixture: run not queued"
+runner once 2>/dev/null
+wait "$S12"; assert_equals 0 "$?" "re-running at the pushed head is not refused ($(cat "$TMP_ROOT/c12.err"))"
+git -C "$WT" commit -q --amend -m "worker amend"
+AMENDED=$(git -C "$WT" rev-parse HEAD)
+client axi status > /dev/null 2> "$TMP_ROOT/c12s.err" &
+S12=$!
+wait_for queued_is 1 || fail "stale fixture: status not queued"
+runner once 2>/dev/null
+wait "$S12"
+assert_equals "$AMENDED" "$(git -C "$WT" rev-parse HEAD)" "an unchanged origin head must not replace the worker's own rewrite"
+assert_contains "$(cat "$TMP_ROOT/c12s.err")" "diverged" "expected text"
+pass "a worker follows a rebase pushed during its request and keeps its own rewrites otherwise"
 
 # --- 8. Service definition ----------------------------------------------------------
 PLIST=$(runner install --print)

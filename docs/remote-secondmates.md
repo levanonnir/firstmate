@@ -636,12 +636,12 @@ The worker still implements and commits on the remote host; only the no-mistakes
 
 The primary reaches out; the remote host never gets any access to the primary.
 
-1. A worker in the remote home runs `fm-gate-spool.sh nm -- <no-mistakes args>` where it would have run `no-mistakes <args>`.
+1. A worker in the remote home runs `fm-gate-spool.sh nm --project <name> -- <no-mistakes args>` where it would have run `no-mistakes <args>`.
    The command writes a durable request to `state/gate-spool/` in the remote home and waits.
 2. `bin/fm-gate-runner.sh` on the primary polls each route named in `config/gate-relay` through `fm-on.sh`, claims a request, and fetches the worker's branch from the remote worktree over SSH with forwarding disabled.
 3. The runner keeps one clone per project and one worktree per branch under `state/gate-runner/`, initializes the gate there, and runs the same `no-mistakes` arguments in that worktree.
 4. The runner sends the stdout, stderr, and exit status back as the request's result, and the worker's command prints them unchanged.
-5. After each result the worker's command moves the worker's branch to the head the pipeline pushed to the forge, when its copy is clean and still at the head the request was made at or behind the pushed head (the pipeline rebases, so the pushed head need not descend from it).
+5. After each result the worker's command moves the worker's branch to the head the pipeline pushed to the forge, when its copy is clean and behind the pushed head, or still at the head the request was made at while origin moved during the request (the pipeline rebases, so the pushed head need not descend from it). A stale origin head never replaces a branch the worker rewrote itself.
 
 A request is a directory that moves by atomic rename through `queued`, `claimed`, `done`, and `delivered`.
 [`bin/fm-gate-spool.sh`](../bin/fm-gate-spool.sh) owns that queue, the verb allowlist, and the `--yes` ban.
@@ -650,7 +650,8 @@ A request is a directory that moves by atomic rename through `queued`, `claimed`
 ### Offline primary and no fallback
 
 When the primary is asleep, offline, or unreachable, nothing runs anywhere: requests stay queued in the remote home and the worker's command keeps waiting.
-When the primary returns, the runner serves them in order, one request at a time per branch.
+When the primary returns, the runner serves them in order.
+Gate-changing requests (`axi run`, `respond`, `answer`, `retry`, `handoff`) run one at a time per branch; reads and `axi abort` run at once, so an abort can stop an active run.
 The remote host never runs the pipeline as a fallback, and the worker brief says so.
 The runner's LaunchAgent is frozen by sleep and resumes on wake, so no request is lost across it.
 
@@ -691,7 +692,7 @@ The primary's no-mistakes version, configuration, and agent govern the run.
   To make "no fallback" structural rather than instructed, eject the remote host's local gate for the project after those workers finish (`no-mistakes eject` in the project clone there).
 - One runner serves a primary home; a second refuses to start.
 - A remote worker's teardown cannot abort a run parked on the primary, because it looks only at the remote host's own gate.
-  Abort it through `fm-gate-spool.sh nm -- axi abort` from the worktree first.
+  Abort it through `fm-gate-spool.sh nm --project <name> -- axi abort` from the worktree first.
 - Only the output the runner returns is visible to the worker; each stream is capped at 200,000 bytes.
 - `direct-PR` and `local-only` tasks are unaffected and never use the relay.
 - `forge=gerrit` is not supported: the relay refuses `axi sync`, which a Gerrit no-mistakes task needs to finish.

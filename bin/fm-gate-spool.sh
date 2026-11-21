@@ -163,14 +163,15 @@ has_newer_request() { # <id> <project> <branch>
 
 # Fast-forward the worker's branch to the head the primary's pipeline pushed.
 # The pipeline rebases the branch, so its head may not descend from the head the
-# request was made at; a copy still at that head follows it.
-sync_branch() { # <branch> <request-sha>
-  local branch=$1 sent=$2 fetched head
+# request was made at; a copy still at that head follows it, but only when origin
+# moved during the request, so a stale origin head never replaces local rewrites.
+sync_branch() { # <branch> <request-sha> <origin-head-at-queue-time, or ? when unknown>
+  local branch=$1 sent=$2 before=$3 fetched head
   git fetch --quiet origin "refs/heads/$branch" 2>/dev/null || return 0
   fetched=$(git rev-parse FETCH_HEAD 2>/dev/null) || return 0
   head=$(git rev-parse HEAD)
   [ "$fetched" != "$head" ] || return 0
-  if git merge-base --is-ancestor HEAD "$fetched" 2>/dev/null || { [ "$head" = "$sent" ] && ! git merge-base --is-ancestor "$fetched" HEAD 2>/dev/null; }; then
+  if git merge-base --is-ancestor HEAD "$fetched" 2>/dev/null || { [ "$head" = "$sent" ] && [ "$before" != "?" ] && [ "$fetched" != "$before" ] && ! git merge-base --is-ancestor "$fetched" HEAD 2>/dev/null; }; then
     if git diff --quiet && git diff --cached --quiet; then
       git reset --hard --quiet "$fetched" >/dev/null 2>&1 \
         && printf 'fm-gate: branch %s moved to the pipeline head %s\n' "$branch" "$fetched" >&2
@@ -183,7 +184,7 @@ sync_branch() { # <branch> <request-sha>
 }
 
 cmd_nm() {
-  local project= top branch sha id key tmp payload rc dir read_only
+  local project= top branch sha id key tmp payload rc dir read_only before
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --project) [ "$#" -ge 2 ] || die "--project needs a value" 64; project=$2; shift 2 ;;
@@ -209,6 +210,7 @@ cmd_nm() {
   else
     find "$SPOOL/delivered" -mindepth 1 -maxdepth 1 -mtime "+$DELIVERED_KEEP_DAYS" -exec rm -rf -- {} + 2>/dev/null || true
     id="$(date +%s)-$$-$RANDOM"
+    before=$(git ls-remote origin "refs/heads/$branch" 2>/dev/null) && before=$(printf '%s' "$before" | cut -f1) || before='?'
     printf '%s\n' "$key" > "$tmp/key"
     printf '%s\0' "${NORM_ARGS[@]}" > "$tmp/argv"
     {
@@ -217,6 +219,7 @@ cmd_nm() {
       printf 'sha=%s\n' "$sha"
       printf 'repo=%s\n' "$(cd "$top" && pwd -P)"
       printf 'created=%s\n' "$(date +%s)"
+      printf 'origin_before=%s\n' "$before"
     } > "$tmp/meta"
     mv "$tmp" "$SPOOL/queued/$id"
     printf 'fm-gate: queued request %s for the primary'"'"'s gate runner (waiting; no local fallback)\n' "$id" >&2
@@ -228,8 +231,9 @@ cmd_nm() {
       rc=$(cat "$dir/rc")
       cat "$dir/out"
       cat "$dir/err" >&2
+      before=$(meta_get "$dir" origin_before)
       [ "$dir" = "$SPOOL/delivered/$id" ] || mv "$dir" "$SPOOL/delivered/$id" 2>/dev/null || true
-      sync_branch "$branch" "$sha"
+      sync_branch "$branch" "$sha" "$before"
       exit "$rc"
     done
     sleep "$POLL"
@@ -253,7 +257,7 @@ cmd_pending() {
   local dir
   for dir in "$SPOOL/queued"/*; do
     [ -d "$dir" ] || continue
-    printf '%s\t%s\t%s\n' "$(basename "$dir")" "$(meta_get "$dir" project)" "$(meta_get "$dir" branch)"
+    printf '%s\t%s\t%s\t%s\n' "$(basename "$dir")" "$(meta_get "$dir" project)" "$(meta_get "$dir" branch)" "$(tr '\0' '\n' < "$dir/argv" | head -n 2 | paste -sd : -)"
   done | sort
 }
 

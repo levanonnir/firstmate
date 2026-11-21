@@ -15,7 +15,8 @@
 # through fm-on.sh, so the primary reaches out over the existing SSH route and
 # the remote host never gets any access to this machine. A sleeping or offline
 # primary simply stops polling: requests stay queued on the remote host and are
-# served in order, one request at a time per branch, when it returns. There is no fallback to the remote host.
+# served in order when it returns, one gate-changing request (axi run, respond,
+# answer, retry, handoff) at a time per branch; reads and axi abort go straight through. There is no fallback to the remote host.
 #
 # Per request the runner validates it again (project clone present under
 # projects/, branch inside the project's registered ship-branch prefix, verb and
@@ -102,8 +103,11 @@ with_lock() { # <name> <command...>; the lock belongs to the request in $REQ_DIR
   shift
   while ! mkdir "$lock" 2>/dev/null; do
     owner=$(cat "$lock/owner" 2>/dev/null || true)
-    if ! pid_alive "$(cat "$owner/pid" 2>/dev/null || true)" && [ "$i" -ge 3 ]; then rm -rf -- "$lock"; continue; fi
-    i=$((i + 1)); [ "$i" -lt 600 ] || return 1
+    if pid_alive "$(cat "$owner/pid" 2>/dev/null || true)"; then
+      i=0
+    else
+      i=$((i + 1)); [ "$i" -lt 3 ] || { rm -rf -- "$lock"; i=0; continue; }
+    fi
     sleep 0.2
   done
   printf '%s\n' "$REQ_DIR" > "$lock/owner"
@@ -177,6 +181,7 @@ prepare_worktree() { # <project> <branch> <sha> <route> <repo> <need-run> -> pri
       with_lock "clone-$project" add_worktree "$clone" "$project" "$branch" "$wt" "$sha" >&2 || return 70
     elif ! git -C "$wt" merge-base --is-ancestor "$sha" HEAD 2>/dev/null; then
       if git -C "$clone" fetch --quiet origin "+refs/heads/$branch:refs/gate-origin/$slug" 2>/dev/null \
+        && [ "$(git -C "$clone" rev-parse "refs/gate-origin/$slug")" != "$sha" ] \
         && git -C "$clone" merge-base --is-ancestor "$sha" "refs/gate-origin/$slug" 2>/dev/null; then
         echo "the pipeline already pushed a newer head for $branch than $sha; sync your branch to origin before running again" >&2
         return 70
@@ -273,7 +278,12 @@ resend_results() {
   done
 }
 
-branch_busy() { # <route> <branch>: a request for it is already running
+serial_verb() { # <verb:subverb>: changes the gate, so runs one at a time per branch
+  case "$1" in axi:run|axi:respond|axi:answer|axi:retry|axi:handoff) return 0 ;; esac
+  return 1
+}
+
+branch_busy() { # <route> <branch>: a gate-changing request for it is already running
   local d
   for d in "$RUN/req/$1".*; do
     [ -d "$d" ] && [ "$(cat "$d/branch" 2>/dev/null || true)" = "$2" ] && pid_alive "$(cat "$d/pid" 2>/dev/null || true)" && return 0
@@ -282,19 +292,19 @@ branch_busy() { # <route> <branch>: a request for it is already running
 }
 
 poll_route() { # <route>
-  local route=$1 listing id project branch dir
+  local route=$1 listing id project branch verb dir
   if ! listing=$(spool "$route" pending 2>/dev/null); then
     log "route $route unreachable; its requests stay queued"
     return 0
   fi
-  while IFS=$'\t' read -r id project branch; do
+  while IFS=$'\t' read -r id project branch verb; do
     [ -n "$id" ] || continue
     [ "$(inflight_count)" -lt "$MAX_INFLIGHT" ] || { log "at the concurrency limit; $id stays queued"; break; }
-    branch_busy "$route" "$branch" && continue
+    if serial_verb "$verb"; then branch_busy "$route" "$branch" && continue; fi
     spool "$route" claim "$id" "$RUNNER_ID" >/dev/null 2>&1 || continue
     dir="$RUN/req/$route.$id"
     mkdir -p "$dir"
-    printf '%s\n' "$branch" > "$dir/branch"
+    if serial_verb "$verb"; then printf '%s\n' "$branch" > "$dir/branch"; fi
     run_request "$route" "$id" "$dir" &
     echo "$!" > "$dir/pid"
   done <<EOF
