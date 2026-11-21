@@ -22,8 +22,9 @@
 # to the remote host.
 #
 # Per request the runner validates it again (project clone present under
-# projects/, branch inside the project's registered ship-branch prefix, verb and
-# flags through fm-gate-spool.sh check), fetches the worker's branch from the
+# projects/, project registered in the route's projects: field, branch inside
+# the project's registered ship-branch prefix, verb and flags through
+# fm-gate-spool.sh check), fetches the worker's branch from the
 # remote worktree over ssh with forwarding disabled, keeps one clone per project
 # and one worktree per branch under state/gate-runner/, runs the same
 # no-mistakes arguments there, and sends the stdout, stderr, and exit status back

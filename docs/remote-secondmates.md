@@ -652,7 +652,7 @@ A request is a directory that moves by atomic rename through `queued`, `claimed`
 When the primary is asleep, offline, or unreachable, nothing runs anywhere: requests stay queued in the remote home and the worker's command keeps waiting.
 When the primary returns, the runner serves them in order.
 Gate-changing requests (`axi run`, `respond`, `answer`, `retry`, `handoff`) run one at a time per branch; reads run at once.
-An `axi abort` cancels the branch's gate-changing requests that are still queued (their waiters get exit 75), so a task torn down while the primary slept never starts its pipeline; it then waits for a request the runner has claimed but not yet started, and passes a run that is already executing so it can stop it.
+An `axi abort` cancels the branch's gate-changing requests that are still queued (their waiters get exit 75, and the abort reports each one it cancelled and succeeds even when no run had started), so a task torn down while the primary slept never starts its pipeline; it then waits for a request the runner has claimed but not yet started, and passes a run that is already executing so it can stop it.
 The remote host never runs the pipeline as a fallback, and the worker brief says so.
 The runner's LaunchAgent is frozen by sleep and resumes on wake, so no request is lost across it.
 
