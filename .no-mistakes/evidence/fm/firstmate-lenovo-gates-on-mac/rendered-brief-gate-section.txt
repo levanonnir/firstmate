@@ -1,0 +1,12 @@
+# Gate on the primary
+This home's no-mistakes validation runs on the primary machine, not on this host, and this section overrides every `no-mistakes` command in this brief and in the /no-mistakes skill.
+Never run `no-mistakes` here, including `doctor` and `init`: the primary builds, tests, reviews, and pushes your branch.
+Wherever you would run `no-mistakes <args>`, run this from your task worktree with your branch committed, with the same arguments:
+`FM_HOME='/var/folders/dh/ks6tdqm57yv6p9d__x14m7y40000gn/T//fm-lab.q0MdcI/lenovo-home' '{run-worktree}/bin/fm-gate-spool.sh' nm --project 'petit-core' -- <args>`
+Its output and exit status are the gate's own, so drive it exactly as the pipeline guidance describes; that guidance, not this section, sets how you wait.
+The daemon runs on the primary and `no-mistakes daemon status` is not available here: where rule 7 asks for it, check only through `axi status`, and report a daemon error only when that result itself shows one.
+Only `axi run`, `respond`, `answer`, `status`, `abort`, `retry`, `rounds`, `logs`, `handoff`, `runs`, and the top-level `status` are available, and `--yes` stays banned.
+When the primary is asleep or offline the request waits in a durable queue and runs when it returns; there is no fallback to this host, so never run the gate here and never abandon the wait.
+Running the identical command again reattaches to the same request instead of duplicating it.
+After each result the tool moves your branch to the head the pipeline pushed (the pipeline may rebase it), so commit nothing yourself after the run starts.
+

@@ -1,0 +1,45 @@
+== worker command taken from the rendered brief: FM_HOME='/var/folders/dh/ks6tdqm57yv6p9d__x14m7y40000gn/T//fm-lab.q0MdcI/lenovo-home' '{run-worktree}/bin/fm-gate-spool.sh' nm --project 'petit-core' --
+
+### S2: Mac asleep -> worker's axi run queues, nothing runs anywhere
+[runner once] 2026-11-21T10:37:42 fm-gate-runner: route lenovo-mate unreachable; its requests stay queued
+queued: 1795250259-65437-14954
+worker still waiting: yes
+worker stderr so far:
+  fm-gate: queued request 1795250259-65437-14954 for the primary's gate runner (waiting; no local fallback)
+primary nm log: <empty>
+lenovo nm log: <empty>
+
+### S3: Mac wakes -> real serve loop (LaunchAgent command) runs the queued gate on the primary
+worker exit=0
+worker stdout:
+  status: gate-reached (ran on primary, intent: ship X)
+primary nm log:
+  PRIMARY no-mistakes cwd=/var/folders/dh/ks6tdqm57yv6p9d__x14m7y40000gn/T/fm-lab.q0MdcI/mac/state/gate-runner/repo/petit-core args=init --skip-user-skill
+  PRIMARY no-mistakes cwd=/var/folders/dh/ks6tdqm57yv6p9d__x14m7y40000gn/T/fm-lab.q0MdcI/mac/state/gate-runner/wt/petit-core/fm-t1-6ebda280 args=axi run --intent -
+lenovo nm log: <empty>
+worker HEAD: b460874 pipeline fix  origin/fm/t1: b460874
+runner status:
+  runner=gate-runner@Nirs-MacBook-Pro
+  last-poll=1795250264
+  inflight=0
+  routes=lenovo-mate 
+
+### S4: adversarial - --yes and non-relay verbs refused before queuing
+fm-gate: refused: --yes is banned fleet-wide because it would answer ask-user findings with no escalation
+rc=64
+fm-gate: refused: init is not a gate verb; the primary runs the gate and only axi drive verbs, runs, and status are relayed
+rc=64
+fm-gate: refused: axi sync is not a gate verb; the primary runs the gate and only axi drive verbs, runs, and status are relayed
+rc=64
+
+### S5: Mac asleep again, run queued then abort queued -> abort cancels queued run; no pipeline runs on wake
+queued run exit=75
+  run stderr: fm-gate: queued request 1795250265-67105-21799 for the primary's gate runner (waiting; no local fallback)
+  run stderr: fm-gate: request 1795250265-67105-21799 was cancelled by a later axi abort before it started
+abort exit=0
+  abort out: aborted
+  abort err: fm-gate: cancelled queued request 1795250265-67105-21799
+  abort err: fm-gate: queued request 1795250266-67392-21567 for the primary's gate runner (waiting; no local fallback)
+primary nm log after wake:
+  PRIMARY no-mistakes cwd=/var/folders/dh/ks6tdqm57yv6p9d__x14m7y40000gn/T/fm-lab.q0MdcI/mac/state/gate-runner/wt/petit-core/fm-t1-6ebda280 args=axi abort
+lenovo nm log: <empty>

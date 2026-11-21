@@ -1,0 +1,16 @@
+ok - offline primary: request queues, worker waits, nothing runs, no remote fallback
+ok - only routes named in config/gate-relay are served
+ok - primary back: the gate ran on the primary and the worker received its output and the pipeline head
+ok - gate exit status and stderr pass through unchanged
+ok - an identical in-flight request reattaches instead of duplicating
+ok - --yes and non-gate verbs are refused before anything is queued
+ok - the primary refuses a branch outside the project's ship-branch prefix
+ok - a request orphaned by a dead runner is re-served when safe and failed when not
+ok - the primary refuses a project the route is not registered for
+ok - a finished unread result is not reattached to a later gate or to a read
+ok - reads and abort run while a gate run is active; another answer waits
+ok - a worker follows a rebase pushed during its request and keeps its own rewrites otherwise
+ok - an abort queued while the primary sleeps cancels the branch's queued run
+ok - an abort that cancelled a branch's first run reports success
+ok - the LaunchAgent definition keeps the runner alive from this home
+bash tests/fm-gate-relay.test.sh  6.36s user 10.12s system 45% cpu 36.063 total
