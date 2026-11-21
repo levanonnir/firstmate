@@ -82,6 +82,8 @@ cancel_queued_serial() { # <project> <branch>
     mv "$dir" "$hold" 2>/dev/null || continue
     : > "$hold/out"
     printf 'fm-gate: request %s was cancelled by a later axi abort before it started\n' "$id" > "$hold/err"
+    CANCELLED=$((CANCELLED + 1))
+    printf 'fm-gate: cancelled queued request %s\n' "$id" >&2
     printf '75\n' > "$hold/rc"
     mv "$hold" "$SPOOL/done/$id"
   done
@@ -236,6 +238,7 @@ cmd_nm() {
   class=$(verb_class "${NORM_ARGS[0]}:${NORM_ARGS[1]:-}")
   read_only=0
   [ "$class" != read ] || read_only=1
+  CANCELLED=0
   [ "$class" != abort ] || cancel_queued_serial "$project" "$branch"
   if id=$(find_open_by_key "$key" "$project" "$branch" "$read_only"); then
     rm -rf -- "$tmp"
@@ -253,6 +256,7 @@ cmd_nm() {
       printf 'repo=%s\n' "$(cd "$top" && pwd -P)"
       printf 'created=%s\n' "$(date +%s)"
       printf 'origin_before=%s\n' "$before"
+      printf 'cancelled=%s\n' "$CANCELLED"
     } > "$tmp/meta"
     mv "$tmp" "$SPOOL/queued/$id"
     printf 'fm-gate: queued request %s for the primary'"'"'s gate runner (waiting; no local fallback)\n' "$id" >&2
@@ -263,7 +267,12 @@ cmd_nm() {
       [ -f "$dir/rc" ] || continue
       rc=$(cat "$dir/rc")
       cat "$dir/out"
-      cat "$dir/err" >&2
+      if [ "$rc" = 66 ] && { [ "$CANCELLED" -gt 0 ] || [ "$(meta_get "$dir" cancelled)" -gt 0 ] 2>/dev/null; }; then
+        printf 'fm-gate: no gate run had started on the primary; the abort cancelled the queued request before it ran\n' >&2
+        rc=0
+      else
+        cat "$dir/err" >&2
+      fi
       before=$(meta_get "$dir" origin_before)
       [ "$dir" = "$SPOOL/delivered/$id" ] || mv "$dir" "$SPOOL/delivered/$id" 2>/dev/null || true
       sync_branch "$branch" "$sha" "$before"

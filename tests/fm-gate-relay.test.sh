@@ -316,12 +316,29 @@ client axi abort > "$TMP_ROOT/c13a.out" 2>/dev/null &
 A13=$!
 wait "$R13"; assert_equals 75 "$?" "a queued run cancelled by a later abort"
 assert_contains "$(cat "$TMP_ROOT/c13r.err")" "cancelled by a later axi abort" "expected text"
-queued_is 1 || fail "only the abort should remain queued"
+wait_for queued_is 1 || fail "only the abort should remain queued"
 rm -f "$OFFLINE"
 runner once 2>/dev/null
 wait "$A13"; assert_equals 0 "$?" "the abort is served once the primary is back"
 assert_equals "$RUNS_BEFORE" "$(grep -c '|axi run' "$NM_LOG")" "no pipeline may start for the cancelled task"
 pass "an abort queued while the primary sleeps cancels the branch's queued run"
+
+git -C "$WT" checkout -q -b fm/t2
+: > "$OFFLINE"
+client axi run > /dev/null 2>&1 &
+R13=$!
+wait_for queued_is 1 || fail "first-gate fixture: run not queued"
+client axi abort > /dev/null 2> "$TMP_ROOT/c13b.err" &
+A13=$!
+wait "$R13"; assert_equals 75 "$?" "a first-gate run cancelled by a later abort"
+wait_for queued_is 1 || fail "first-gate fixture: abort not queued"
+rm -f "$OFFLINE"
+runner once 2>/dev/null
+wait "$A13"; assert_equals 0 "$?" "an abort that cancelled a branch's first run succeeds ($(cat "$TMP_ROOT/c13b.err"))"
+assert_contains "$(cat "$TMP_ROOT/c13b.err")" "cancelled queued request" "expected text"
+case "$(cat "$TMP_ROOT/c13b.err")" in *"start it with axi run"*) fail "a successful abort must not advise starting a run" ;; esac
+git -C "$WT" checkout -q fm/t1
+pass "an abort that cancelled a branch's first run reports success"
 
 # --- 8. Service definition ----------------------------------------------------------
 PLIST=$(runner install --print)
