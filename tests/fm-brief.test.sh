@@ -1253,6 +1253,34 @@ test_home_brief_include_is_appended_last() {
   pass "fm-brief.sh: the home brief include lands last on ship and scout, verbatim, and fails closed"
 }
 
+# A home whose gate runs on its primary (config/gate-on-primary) sends every
+# no-mistakes command through the relay; every other home and every other mode
+# keeps the standard contract.
+test_gate_on_primary_routes_no_mistakes_through_the_relay() {
+  local home brief
+  home="$TMP_ROOT/gate-relay-home"
+  mkdir -p "$home/config"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" relay-off some-proj --mode no-mistakes >/dev/null || fail "ship scaffold failed without the relay flag"
+  assert_no_grep '# Gate on the primary' "$home/data/relay-off/brief.md" "a home without the flag still got the relay section"
+  # shellcheck disable=SC2016 # Literal backticks in the brief text.
+  assert_grep 'run `no-mistakes init`' "$home/data/relay-off/brief.md" "the standard no-mistakes setup step is missing"
+
+  : > "$home/config/gate-on-primary"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" relay-on some-proj --mode no-mistakes >/dev/null || fail "ship scaffold failed with the relay flag"
+  brief="$home/data/relay-on/brief.md"
+  assert_grep '# Gate on the primary' "$brief" "the relay section is missing"
+  assert_grep "fm-gate-spool.sh' nm --project 'some-proj' --" "$brief" "the relay command does not name the script and project"
+  assert_grep 'there is no fallback to this host' "$brief" "the no-fallback rule is missing"
+  # shellcheck disable=SC2016 # Literal backticks in the brief text.
+  assert_grep 'Do not run `no-mistakes doctor` or `no-mistakes init` on this host' "$brief" "the local setup step was not replaced"
+  # shellcheck disable=SC2016 # Literal backticks in the brief text.
+  assert_no_grep 'run `no-mistakes init`.' "$brief" "the local no-mistakes init step survived"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" relay-direct some-proj --mode direct-PR >/dev/null || fail "direct-PR scaffold failed with the relay flag"
+  assert_no_grep '# Gate on the primary' "$home/data/relay-direct/brief.md" "direct-PR work must not get the gate relay"
+  pass "fm-brief.sh: config/gate-on-primary routes a no-mistakes ship through the primary's gate only"
+}
+
 # --base-branch names the branch a task starts from and a ship's PR targets. It is
 # recorded as a Base branch line under # Setup, which fm-spawn reads back, and is
 # refused where no pull request carries the work.
@@ -1572,6 +1600,7 @@ test_scout_lavish_line_follows_presentation_floor
 test_workers_wait_without_spending_turns
 test_wait_no_turns_absent_keeps_the_previous_brief
 test_home_brief_include_is_appended_last
+test_gate_on_primary_routes_no_mistakes_through_the_relay
 test_base_branch_is_rendered_and_bounded
 test_ship_branch_prefix_defaults_to_legacy_fm
 test_ship_branch_prefix_override_is_consistent_across_modes

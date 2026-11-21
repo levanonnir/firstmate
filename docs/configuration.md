@@ -13,6 +13,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
+| Running a remote home's no-mistakes gate on the primary | [Gate relay](#gate-relay-configgate-relay--configgate-on-primary) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -975,6 +976,18 @@ When the file is absent, worker launches do not add a board address and retain t
 
 Malformed or unreadable values refuse the launch before the worker starts.
 The address selects the existing shared server; it does not authorize starting or stopping the server, and the Lavish startup crash remains a vendor-tool concern.
+
+## Gate relay (config/gate-relay / config/gate-on-primary)
+
+Two optional, local, gitignored files let a remote second mate's no-mistakes validation run on the primary; [Gate on the primary](remote-secondmates.md#gate-on-the-primary) owns the design and setup.
+
+- `config/gate-relay` in the primary's home lists the remote second-mate ids whose gate this primary serves, one per line, with `#` comments.
+  A route that is not listed is never polled.
+- `config/gate-on-primary` in the remote second mate's own home is an empty marker.
+  While it exists, `bin/fm-brief.sh` renders no-mistakes ship briefs with the relay command in place of the local `no-mistakes` setup and commands.
+
+Neither file is inherited into secondmate homes.
+`FM_GATE_RUNNER_INTERVAL` (poll seconds, default 20) and `FM_GATE_RUNNER_MAX` (concurrent requests, default 3) tune the runner, and [`bin/fm-gate-runner.sh`](../bin/fm-gate-runner.sh) owns the rest.
 
 ## Home brief include (config/brief-include.md)
 

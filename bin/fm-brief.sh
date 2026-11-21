@@ -129,6 +129,10 @@
 # regular file, or text carrying its own "Delivery contract: mode=" line (which
 # a later scout promotion could not outrank), stops the scaffold before
 # anything is written. Secondmate charters never take it.
+# A home whose no-mistakes gate runs on its primary (config/gate-on-primary exists;
+# docs/remote-secondmates.md "Gate on the primary" owns the design) renders its
+# no-mistakes ship scaffold's Setup step 2 and a closing "# Gate on the primary"
+# section that send every no-mistakes command through bin/fm-gate-spool.sh.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -674,8 +678,30 @@ case "$MODE" in
   *)  # no-mistakes
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+    if [ -f "$CONFIG/gate-on-primary" ]; then
+      SETUP2="
+2. Do not run \`no-mistakes doctor\` or \`no-mistakes init\` on this host; this home's gate runs on the primary (see Gate on the primary below)."
+    fi
     ;;
 esac
+GATE_RELAY_BLOCK=
+if [ "$MODE" = no-mistakes ] && [ -f "$CONFIG/gate-on-primary" ]; then
+  GATE_CMD="FM_HOME=$(shell_quote "$FM_HOME") $(shell_quote "$FM_ROOT/bin/fm-gate-spool.sh") nm --project $(shell_quote "$REPO") --"
+  IFS= read -r -d '' GATE_RELAY_BLOCK <<EOF || true
+
+# Gate on the primary
+This home's no-mistakes validation runs on the primary machine, not on this host, and this section overrides every \`no-mistakes\` command in this brief and in the /no-mistakes skill.
+Never run \`no-mistakes\` here, including \`doctor\` and \`init\`: the primary builds, tests, reviews, and pushes your branch.
+Wherever you would run \`no-mistakes <args>\`, run this from your task worktree with your branch committed, with the same arguments:
+\`$GATE_CMD <args>\`
+Its output and exit status are the gate's own, so drive it exactly as the pipeline guidance describes; that guidance, not this section, sets how you wait.
+The daemon runs on the primary and \`no-mistakes daemon status\` is not available here: where rule 7 asks for it, check only through \`axi status\`, and report a daemon error only when that result itself shows one.
+Only \`axi run\`, \`respond\`, \`answer\`, \`status\`, \`abort\`, \`retry\`, \`rounds\`, \`logs\`, \`handoff\`, \`runs\`, and the top-level \`status\` are available, and \`--yes\` stays banned.
+When the primary is asleep or offline the request waits in a durable queue and runs when it returns; there is no fallback to this host, so never run the gate here and never abandon the wait.
+Running the identical command again reattaches to the same request instead of duplicating it.
+After each result the tool moves your branch to the head the pipeline pushed (the pipeline may rebase it), so commit nothing yourself after the run starts.
+EOF
+fi
 RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
 DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
 
@@ -729,7 +755,7 @@ $WAIT_BLOCK$INBOX_SECTION
 A project's \`AGENTS.md\` or \`CLAUDE.md\` is loaded into every agent session in that project, so edit it only to correct information that is factually wrong - including information your own change made wrong - and never to add knowledge because it is missing.
 A correction edits only the wrong text: do not run \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`, create either file, or add sections, headings, or pointers alongside it.
 
-$DOD
+$DOD$GATE_RELAY_BLOCK
 EOF
 append_brief_include
 if [ "$FORGE" = none ]; then

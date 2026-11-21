@@ -16,6 +16,7 @@ Firstmate does not support placing an individual worker remotely or failing a re
 | Create the route and the remote home | [Provision a route](#provision-a-route) |
 | Launch, recover, message, and read a remote second mate | [Normal operation](#normal-operation) |
 | Move queued work to the remote home | [Backlog handoff](#backlog-handoff) |
+| Run a remote home's no-mistakes gate on the primary | [Gate on the primary](#gate-on-the-primary) |
 | Push configuration, relaunch, update, or retire | [Sync, update, and retirement](#sync-update-and-retirement) |
 | Run the tests or a real-host smoke test | [Verification](#verification) |
 
@@ -624,6 +625,79 @@ For a remote route, the handoff takes these steps:
 The [`bin/fm-backlog-handoff.sh`](../bin/fm-backlog-handoff.sh) header owns remote outbox release after receipt and stable wake-correlation retry behavior.
 Bootstrap retries pending outboxes and wakes, and emits `SECONDMATE_HANDOFF:` only when an outbox remains.
 There is no two-phase journal and no additional tasks-axi release requirement.
+
+## Gate on the primary
+
+A remote second mate's workers can validate through the primary's machine instead of their own host.
+Use it when the remote host cannot carry the validation load, for example a small machine that freezes under the Test step.
+The worker still implements and commits on the remote host; only the no-mistakes pipeline (test, review, push, pull request, and CI monitoring) runs on the primary, with the primary's no-mistakes daemon, agents, and credentials.
+
+### How it works
+
+The primary reaches out; the remote host never gets any access to the primary.
+
+1. A worker in the remote home runs `fm-gate-spool.sh nm --project <name> -- <no-mistakes args>` where it would have run `no-mistakes <args>`.
+   The command writes a durable request to `state/gate-spool/` in the remote home and waits.
+2. `bin/fm-gate-runner.sh` on the primary polls each route named in `config/gate-relay` through `fm-on.sh`, claims a request, and fetches the worker's branch from the remote worktree over SSH with forwarding disabled.
+3. The runner keeps one clone per project and one worktree per branch under `state/gate-runner/`, initializes the gate there, and runs the same `no-mistakes` arguments in that worktree.
+4. The runner sends the stdout, stderr, and exit status back as the request's result, and the worker's command prints them unchanged.
+5. After each result the worker's command moves the worker's branch to the head the pipeline pushed to the forge, when its copy is clean and behind the pushed head, or still at the head the request was made at while origin moved during the request (the pipeline rebases, so the pushed head need not descend from it). A stale origin head never replaces a branch the worker rewrote itself.
+
+A request is a directory that moves by atomic rename through `queued`, `claimed`, `done`, and `delivered`.
+[`bin/fm-gate-spool.sh`](../bin/fm-gate-spool.sh) owns that queue, the verb allowlist, and the `--yes` ban.
+[`bin/fm-gate-runner.sh`](../bin/fm-gate-runner.sh) owns polling, per-request validation, orphan reconciliation, and the macOS LaunchAgent.
+
+### Offline primary and no fallback
+
+When the primary is asleep, offline, or unreachable, nothing runs anywhere: requests stay queued in the remote home and the worker's command keeps waiting.
+When the primary returns, the runner serves them in order.
+Gate-changing requests (`axi run`, `respond`, `answer`, `retry`, `handoff`) run one at a time per branch; reads run at once.
+An `axi abort` cancels the branch's gate-changing requests that are still queued (their waiters get exit 75, and the abort reports each one it cancelled and succeeds even when no run had started), so a task torn down while the primary slept never starts its pipeline; it then waits for a request the runner has claimed but not yet started, and passes a run that is already executing so it can stop it.
+The remote host never runs the pipeline as a fallback, and the worker brief says so.
+The runner's LaunchAgent is frozen by sleep and resumes on wake, so no request is lost across it.
+
+An identical request that is still queued or running is reattached, so a killed wait or a repeated command never answers a gate twice.
+A finished but unread result is reattached too, except for read verbs (`axi status`, `axi logs`, `axi rounds`, `runs`, `status`) and except once a later request exists for the same branch, so a stale answer never satisfies a later gate.
+A result that cannot be sent back is kept and re-sent on later polls.
+A request left claimed by a dead runner is released when it never started or is safe to repeat (`axi run`, `axi status`, `axi logs`, `axi rounds`, `runs`, `status`).
+An answer that may already have been applied is failed with exit 75 rather than sent twice, and the worker checks the gate state before answering again.
+
+### What the primary validates
+
+The runner trusts nothing in a request:
+
+- Only the `axi` drive verbs, `runs`, and `status` run, and `--yes` is refused, through the same check the worker side uses.
+- The project must have a clone under the primary's `projects/` whose origin the runner reads itself.
+  A request never supplies an origin.
+- The project must be listed in the route's `projects:` field in `data/secondmates.md`.
+- The branch must start with the project's registered ship-branch prefix.
+- The fetch uses the SSH alias recorded for the route in `data/secondmates.md`.
+
+The pipeline executes the worker's branch on the primary, as it would for any worker there.
+It pushes the branch and opens the pull request with the primary's forge identity, so those pull requests are authored by the primary's account.
+The primary's no-mistakes version, configuration, and agent govern the run.
+
+### Set it up
+
+1. Land this change and converge the remote host's Firstmate clone so it has both scripts (the normal update path).
+2. On the primary, list the route in `config/gate-relay`, one remote second-mate id per line.
+3. On the primary, run `bin/fm-gate-runner.sh install` to write and load the `dev.firstmate.gate-runner` LaunchAgent; `install --print` shows it without loading it.
+   Use `bin/fm-gate-runner.sh status` to see the last poll.
+4. In the remote home, create an empty `config/gate-on-primary`.
+   New ship briefs for `no-mistakes` tasks then replace the local setup step with a "Gate on the primary" section naming the exact command.
+5. Make sure the primary can build and test the project the way any primary worker would, because the gate's test command runs in the runner's worktree there.
+
+### Limits
+
+- Workers launched before step 4 keep their local gate.
+  To make "no fallback" structural rather than instructed, eject the remote host's local gate for the project after those workers finish (`no-mistakes eject` in the project clone there).
+- One runner serves a primary home; a second refuses to start.
+- A remote worker's teardown cannot abort a run parked on the primary, because it looks only at the remote host's own gate.
+  Abort it through `fm-gate-spool.sh nm --project <name> -- axi abort` from the worktree first.
+- Only the output the runner returns is visible to the worker; each stream is capped at 200,000 bytes.
+- `direct-PR` and `local-only` tasks are unaffected and never use the relay.
+- `forge=gerrit` is not supported: the relay refuses `axi sync`, which a Gerrit no-mistakes task needs to finish.
+- Worktrees and `refs/gate` refs under `state/gate-runner/` grow with each task branch and are not cleaned up; pruning them is a known follow-up.
 
 ## Sync, update, and retirement
 
