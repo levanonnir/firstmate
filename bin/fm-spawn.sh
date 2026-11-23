@@ -4777,7 +4777,16 @@ BUSY_GEN=
       j_stop=$(json_escape "${stop_turnend}$busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       stop_entry="\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stop\"}]}],"
     fi
-    hooks_json="\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_submit\"}]}],${stop_entry}\"StopFailure\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stopfail\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_sessionend\"}]}]}"
+    # Optional Langfuse trace of a crewmate session (PetIt-Ltd/agents,
+    # common/trace_hooks.py). Armed only when that script exists on this
+    # host; fails open so it can never affect Claude's own lifecycle.
+    trace_entry=
+    agents_trace="${FM_AGENTS_DIR:-$HOME/agents}/common/trace_hooks.py"
+    if [ "$KIND" != secondmate ] && [ -f "$agents_trace" ]; then
+      j_trace=$(json_escape "python3 $(shell_quote "$agents_trace") claude-hook 2>/dev/null || true")
+      trace_entry=",{\"type\":\"command\",\"command\":\"$j_trace\"}"
+    fi
+    hooks_json="\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_submit\"}]}],${stop_entry}\"StopFailure\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stopfail\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_sessionend\"}${trace_entry}]}]}"
     if [ "$KIND" = secondmate ]; then
       session_keys='"feedbackDrafts":"off",'
       if [ "$KEEP_AI_TRAILERS" != 1 ]; then
