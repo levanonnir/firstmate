@@ -64,13 +64,25 @@ def candidates(msg):
     return out
 
 
+def content(a):
+    vals = [a.get(k) for k in ("key", "q", "pr", "task", "blocker", "hold", "reason")]
+    vals += a.get("links") or []
+    vals += [v for o in a.get("options") or [] if isinstance(o, dict) for v in (o.get("label"), o.get("does"))]
+    return " ".join(str(v) for v in vals if v).lower()
+
+
+def has(text, token):
+    lead = r"(?<!\d)" if token.isdigit() else r"(?<![\w/])"
+    return re.search(lead + re.escape(token) + r"(?!\w)", text) is not None
+
+
 def covered(item, asks):
-    blob = [json.dumps(a, ensure_ascii=False).lower() for a in asks]
-    ids = [m.group(0).lower().rstrip(").,;:") for m in ID.finditer(item)]
+    blob = [content(a) for a in asks]
+    ids = [m.group(0).lower().rstrip("`>*]).,;:'\"") for m in ID.finditer(item)]
     if ids:
         for i in ids:
             keys = [i] if i.startswith("http") else NUM.findall(i)
-            if any(any(k in b for b in blob) for k in keys):
+            if any(any(has(b, k) for b in blob) for k in keys):
                 return True
         return False
     words = [w for w in re.findall(r"[a-z][a-z0-9.-]{3,}", item.lower()) if w not in STOP]
