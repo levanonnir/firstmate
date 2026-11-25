@@ -3754,6 +3754,11 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
     # Swallowing them left a wrong active workspace with no operator-visible
     # signal at all. The close stays non-fatal exactly as before: the presence
     # gate below is what decides whether any durable record may be removed.
+    # A captain viewing this finished task's tab is moved to the home
+    # workspace first, so the close is not refused on his account.
+    fm_backend_herdr_projection_vacate_viewed_tab "$HERDR_PRESENTATION_SESSION" \
+      "$(fm_backend_herdr_projection_journal_field "$HERDR_PRESENTATION_JOURNAL" tab_id 2>/dev/null)" \
+      "$(fm_backend_herdr_projection_journal_field "$HERDR_PRESENTATION_JOURNAL" parent_workspace_id 2>/dev/null)" || true
     fm_backend_herdr_projection_close_pane_focus_preserving \
       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" || true
   else
