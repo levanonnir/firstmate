@@ -1,0 +1,129 @@
+=== S1 register lifecycle
+$ fm-ask.sh open merge-petit-core-2211 --type merge --q Merge PR 2211 (renumber migrations)? --pr https://github.com/acme/petit-core/pull/2211 --option Merge|squash and delete branch --order 1
+ask opened: merge-petit-core-2211
+[rc=0]
+$ fm-ask.sh open decide-name-field --type decide --q Should the signup form keep the legacy nickname field? --option Keep|leave as is --option Drop|remove the column
+ask opened: decide-name-field
+[rc=0]
+$ fm-ask.sh open merge-petit-core-2211 --type merge --q Merge PR 2211 now? --pr https://github.com/acme/petit-core/pull/2211 --order 1
+ask updated: merge-petit-core-2211
+[rc=0]
+$ fm-ask.sh list
+2 open, 0 answered and waiting for you to act
+[merge] merge-petit-core-2211: Merge PR 2211 now?
+   https://github.com/acme/petit-core/pull/2211
+[decide] decide-name-field: Should the signup form keep the legacy nickname field?
+   - Keep (leave as is)
+   - Drop (remove the column)
+[rc=0]
+$ fm-ask.sh answer decide-name-field drop it
+answer recorded: decide-name-field
+[rc=0]
+$ fm-ask.sh list --all
+1 open, 1 answered and waiting for you to act
+[merge] merge-petit-core-2211: Merge PR 2211 now?
+   https://github.com/acme/petit-core/pull/2211
+[decide] decide-name-field: Should the signup form keep the legacy nickname field?
+   - Keep (leave as is)
+   - Drop (remove the column)
+   ANSWERED: drop it  -> act on it, then: fm-ask.sh close decide-name-field
+[rc=0]
+$ fm-ask.sh find nickname
+[decide] decide-name-field: Should the signup form keep the legacy nickname field?
+   - Keep (leave as is)
+   - Drop (remove the column)
+   ANSWERED: drop it  -> act on it, then: fm-ask.sh close decide-name-field
+[rc=0]
+$ fm-ask.sh close decide-name-field
+closed: decide-name-field
+[rc=0]
+$ fm-ask.sh close decide-name-field
+fm-ask: no open ask decide-name-field
+[rc=1]
+$ fm-ask.sh open bad key --type do --q x
+fm-ask: a key is one short word-like id (no spaces)
+[rc=1]
+$ fm-ask.sh list --json
+[
+ {
+  "ts": "2026-11-25T10:57:36Z",
+  "key": "merge-petit-core-2211",
+  "type": "merge",
+  "q": "Merge PR 2211 now?",
+  "pr": "https://github.com/acme/petit-core/pull/2211",
+  "order": 1,
+  "opened": "2026-11-25T10:57:36Z",
+  "state": "open",
+  "answer": null
+ }
+]
+[rc=0]
+=== S2 turn-end guard
+--- check: filed PR by URL in backticks -> pass
+    msg| Waiting on you:
+    msg| - Merge `https://github.com/acme/petit-core/pull/2211`
+[rc=0]
+--- check: filed PR by #id -> pass
+    msg| Ready to merge:
+    msg| - #2211 renumber migrations
+[rc=0]
+--- check: unfiled PR -> block
+    msg| Waiting on you:
+    msg| - Merge #2299 (new billing page)
+Your reply asks the captain for things that have no record in the captain ask register, so Bridge, Helm and the companion app will not show them:
+  - Merge #2299 (new billing page)
+File each one with bin/fm-ask.sh open <key> --type merge|decide|review|do --q "..." (add --option, --pr, --link, --order, --blocker as they apply; see AGENTS.md section 9, Captain ask register), close any that are settled with bin/fm-ask.sh close <key>, then end the turn again. Do not repeat your reply to the captain.
+[rc=2]
+--- check: prefix PR #221 vs filed 2211 -> block
+    msg| Waiting on you:
+    msg| - review PR #221
+Your reply asks the captain for things that have no record in the captain ask register, so Bridge, Helm and the companion app will not show them:
+  - review PR #221
+File each one with bin/fm-ask.sh open <key> --type merge|decide|review|do --q "..." (add --option, --pr, --link, --order, --blocker as they apply; see AGENTS.md section 9, Captain ask register), close any that are settled with bin/fm-ask.sh close <key>, then end the turn again. Do not repeat your reply to the captain.
+[rc=2]
+--- check: same-turn retry (stop_hook_active) -> never blocks twice
+    msg| Waiting on you:
+    msg| - Merge #2299
+[rc=0]
+--- check: date digits from ts -> block
+    msg| Waiting on you:
+    msg| - Merge #25
+Your reply asks the captain for things that have no record in the captain ask register, so Bridge, Helm and the companion app will not show them:
+  - Merge #25
+File each one with bin/fm-ask.sh open <key> --type merge|decide|review|do --q "..." (add --option, --pr, --link, --order, --blocker as they apply; see AGENTS.md section 9, Captain ask register), close any that are settled with bin/fm-ask.sh close <key>, then end the turn again. Do not repeat your reply to the captain.
+[rc=2]
+--- check: generic record-field words -> block
+    msg| Should I open the task and set the state order label?
+Your reply asks the captain for things that have no record in the captain ask register, so Bridge, Helm and the companion app will not show them:
+  - Should I open the task and set the state order label?
+File each one with bin/fm-ask.sh open <key> --type merge|decide|review|do --q "..." (add --option, --pr, --link, --order, --blocker as they apply; see AGENTS.md section 9, Captain ask register), close any that are settled with bin/fm-ask.sh close <key>, then end the turn again. Do not repeat your reply to the captain.
+[rc=2]
+--- check: unfiled question -> block
+    msg| Do you want me to rotate the staging database credentials tonight?
+Your reply asks the captain for things that have no record in the captain ask register, so Bridge, Helm and the companion app will not show them:
+  - Do you want me to rotate the staging database credentials tonight?
+File each one with bin/fm-ask.sh open <key> --type merge|decide|review|do --q "..." (add --option, --pr, --link, --order, --blocker as they apply; see AGENTS.md section 9, Captain ask register), close any that are settled with bin/fm-ask.sh close <key>, then end the turn again. Do not repeat your reply to the captain.
+[rc=2]
+--- check: plain report, no asks -> pass
+    msg| Shipped #2211. All green.
+[rc=0]
+=== S3 held backlog task
+--- check: held-task by title words -> pass
+    msg| Waiting on you:
+    msg| - Pick the SMS gateway vendor
+[rc=0]
+--- check: hold metadata date #14 -> block
+    msg| Waiting on you:
+    msg| - Merge #14
+Your reply asks the captain for things that have no record in the captain ask register, so Bridge, Helm and the companion app will not show them:
+  - Merge #14
+File each one with bin/fm-ask.sh open <key> --type merge|decide|review|do --q "..." (add --option, --pr, --link, --order, --blocker as they apply; see AGENTS.md section 9, Captain ask register), close any that are settled with bin/fm-ask.sh close <key>, then end the turn again. Do not repeat your reply to the captain.
+[rc=2]
+--- check: hold metadata words captain/repo -> block
+    msg| Should the captain pick the repo name for billing?
+Your reply asks the captain for things that have no record in the captain ask register, so Bridge, Helm and the companion app will not show them:
+  - Should the captain pick the repo name for billing?
+File each one with bin/fm-ask.sh open <key> --type merge|decide|review|do --q "..." (add --option, --pr, --link, --order, --blocker as they apply; see AGENTS.md section 9, Captain ask register), close any that are settled with bin/fm-ask.sh close <key>, then end the turn again. Do not repeat your reply to the captain.
+[rc=2]
+=== S4 non-primary (worktree) inert
+worktree check [rc=0] (expect 0)

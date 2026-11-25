@@ -1,0 +1,21 @@
+home=w1/w1:t1 task=w2/w2:t1 other=w3/w3:t1
+== A: no viewer attached, persisted focus on task tab -> vacate leaves focus untouched
+  before: w2	w2:t1
+  vacate rc=0
+  after:  w2	w2:t1
+== B: live viewer on the finished task tab: close guard BEFORE vacate
+  before: w2	w2:t1
+warning: herdr presentation cleanup target is the captain's active tab; refusing a close that cannot preserve focus
+  close-guard rc=1
+  vacate rc=0
+  after:  w1	w1:t1
+  PASS: captain moved to home workspace tab
+  close-guard rc=0
+== C: live viewer on an unrelated tab -> vacate leaves focus untouched
+  before: w3	w3:t1
+  vacate rc=0
+  after:  w3	w3:t1
+  PASS: untouched
+== D: empty parent workspace id -> no-op
+  rc=0 after: w2	w2:t1
+teardown rc=0
