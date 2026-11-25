@@ -72,7 +72,7 @@ def content(a):
 
 
 def has(text, token):
-    lead = r"(?<!\d)" if token.isdigit() else r"(?<![\w/])"
+    lead = r"(?<!\d)" if token.isdigit() else r"(?<!\w)"
     return re.search(lead + re.escape(token) + r"(?!\w)", text) is not None
 
 
@@ -88,7 +88,7 @@ def covered(item, asks):
     words = [w for w in re.findall(r"[a-z][a-z0-9.-]{3,}", item.lower()) if w not in STOP]
     if not words:
         return True
-    return any(sum(w in b for w in words) >= max(2, len(words) // 2) for b in blob)
+    return any(sum(has(b, w) for w in words) >= max(2, len(words) // 2) for b in blob)
 
 
 def main():
@@ -115,9 +115,12 @@ def main():
         import base64
         for line in open(os.path.join(HOME, "data", "backlog.md"), encoding="utf-8"):
             if "hold-kind: captain" in line and line.lstrip().startswith("- [ ]"):
-                m = re.search(r"fm-hold-v1:([A-Za-z0-9+/=]+)", line)
-                reason = base64.b64decode(m.group(1)).decode("utf-8", "ignore") if m else ""
-                asks.append({"hold": line.strip(), "reason": reason})
+                m = re.search(r"\(hold: ([^)]*)\)", line)
+                reason = m.group(1).strip() if m else ""
+                if reason.startswith("fm-hold-v1:"):
+                    reason = base64.b64decode(reason[len("fm-hold-v1:"):]).decode("utf-8", "ignore")
+                title = re.sub(r"\s*\((?:[\w-]+:|since )[^)]*\)", "", line.strip()[len("- [ ]"):]).strip()
+                asks.append({"hold": title, "reason": reason})
     except Exception:
         pass
     missing = [i for i in items if not covered(i, asks)]
