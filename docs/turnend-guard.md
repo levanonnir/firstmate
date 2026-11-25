@@ -278,11 +278,12 @@ The registrations in detail:
   The continuation's stop carries `stop_hook_active: true`, which bounds it to one per turn, and omp's own cap of eight consecutive continuations is the second backstop.
   `session_stop` never fires for an interrupted turn or a task session, so those boundaries are deliberately unguarded.
 - Cursor registers a `stop` hook in `.cursor/hooks.json` and delegates the whole turn boundary to `bin/fm-turnend-guard-cursor.sh`, the park described below.
-  Cursor also loads `<project>/.claude/settings.json`, so every tracked Claude-shaped entrypoint whose event Cursor covers stands down on a Cursor-delivered payload through `bin/fm-hook-host-lib.sh`.
+  Cursor also loads `<project>/.claude/settings.json`, so the tracked Claude-shaped entrypoints listed below stand down on a Cursor-delivered payload through `bin/fm-hook-host-lib.sh`.
   That predicate reads the delivered payload's own `cursor_version`, never the environment.
   Cursor exports `CURSOR_INVOKED_AS`, `CURSOR_PROJECT_DIR`, and `CURSOR_VERSION` into every child process, so an environment guard would also disable the hooks of a Claude session started by hand from a Cursor pane, which is the hazard the `GROK_SESSION_ID` exclusion below records.
-  The guarded set is the `SessionStart` entry, the two `PreToolUse` Bash entries, and both `Stop` entries.
-  Cursor 2026.08.11-e8db854 does not fire the Claude-shaped `Stop` entry at all, but it is guarded anyway because Cursor has no `asyncRewake`.
+  The guarded set is the `SessionStart` entry, the two `PreToolUse` Bash entries, and the `bin/fm-turnend-guard.sh --claude`, `bin/fm-claude-stop-autoarm.sh`, and `bin/fm-host-mirror.sh hook claude` `Stop` entries.
+  The `bin/fm-ask-check.sh` `Stop` entry does not use that predicate; it is bounded by its 20-second timeout.
+  Cursor 2026.08.11-e8db854 does not fire the Claude-shaped `Stop` entries at all, but they are guarded anyway because Cursor has no `asyncRewake`.
   If a later build did fire it, `bin/fm-claude-stop-autoarm.sh` would run synchronously inside Cursor's stop step and hold that turn open for its declared multi-hour timeout, exactly the wedge grok 1.0.0 produced.
 - Grok registers a `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` and delegates capability selection to `bin/fm-turnend-guard-grok.sh`.
   The tracked Claude Stop entries are inert when `GROK_AGENT` or `GROK_HOOK_EVENT` is present, so Grok's Claude-compatible settings loading cannot create a second continuation path.
