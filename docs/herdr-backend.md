@@ -303,7 +303,7 @@ Both behaviors are fixed in Herdr 0.8.0, and the exact rules live in the adapter
 Projected cleanup therefore:
 
 - Runs under the same session lock.
-- Refuses to delete the tab a live foreground client is viewing.
+- Moves a live foreground client off the doomed tab to the projection's parent (home) workspace first, and still refuses the close when the client remains on that tab.
 - Treats a workspace-emptying close as a focus-safe removal.
 
 A focus-safe removal takes these steps:
