@@ -575,12 +575,16 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
 
 export type PreDeliveryZeroChangeVerdict = "deliver" | "already-drained" | "noop-heartbeat";
 
-function downtimeRecoveryMarkerState(state: string): "none" | "pending" | "announced" | "unreadable" {
+function recoveryMarkerState(state: string): "none" | "acked" | "handling" | "downtime" | "unreadable" {
+  const markerPath = join(state, ".watcher-down");
   try {
-    const marker = readFileSync(join(state, ".watcher-down"), "utf8").trim();
-    if (/^announced:downtime:/.test(marker)) return "announced";
-    if (/^pending:downtime:/.test(marker)) return "pending";
-    return "none";
+    if (!lstatSync(markerPath).isFile()) return "unreadable";
+    const raw = readFileSync(markerPath, "utf8");
+    const match = /^(pending|announced|acked):(handling|downtime):([A-Za-z0-9._-]+)\n$/.exec(raw);
+    if (!match) return "unreadable";
+    const [, status, kind] = match;
+    if (status === "acked") return "acked";
+    return kind === "downtime" ? "downtime" : "handling";
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? "none" : "unreadable";
   }
@@ -604,8 +608,8 @@ export async function preDeliveryZeroChangeCheck(
 ): Promise<PreDeliveryZeroChangeVerdict> {
   if (/^check:\s*rearm-resurface\b/.test(message)) return "deliver";
   if (scope.corrupted) return "deliver";
-  const downtime = downtimeRecoveryMarkerState(state);
-  if (downtime !== "none") return "deliver";
+  const marker = recoveryMarkerState(state);
+  if (marker === "unreadable" || marker === "downtime") return "deliver";
   const changeDetectScript = join(fmRoot, "bin", "fm-change-detect.sh");
   if (scope.status === "empty") {
     if (existsSync(changeDetectScript)) {
@@ -619,7 +623,7 @@ export async function preDeliveryZeroChangeCheck(
       });
       return result.status === 0 ? "already-drained" : "deliver";
     }
-    return "already-drained";
+    return marker === "handling" ? "deliver" : "already-drained";
   }
   const heartbeat = /^heartbeat($|:)/.test(message);
   if (heartbeat && scope.totalRows > 0 && scope.totalRows === scope.heartbeatSeqs.length) {

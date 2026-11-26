@@ -505,6 +505,74 @@ test_drain_ack_records_digest_and_auto_ack_noop_heartbeat() {
   rc=0
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" ack-already-drained || rc=$?
   expect_code 1 "$rc" "ack-already-drained must refuse pending:downtime:*"
+
+  # 3c2. Valid acked:* markers pass both ack-already-drained and auto-ack-noop-heartbeat.
+  printf 'acked:handling:gen-128\n' > "$state/.watcher-down"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" ack-already-drained \
+    || fail "ack-already-drained refused valid acked:handling:*"
+  append_wake "$state" heartbeat heartbeat heartbeat
+  printf 'acked:downtime:gen-129\n' > "$state/.watcher-down"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" auto-ack-noop-heartbeat \
+    || fail "auto-ack-noop-heartbeat refused valid acked:downtime:*"
+  [ ! -s "$state/.wake-queue" ] || fail "auto-ack-noop-heartbeat left rows with acked:downtime:*"
+
+  # 3c3. Corrupt, empty, and symlink .watcher-down MUST fail closed on both paths.
+  printf 'acked:handling:gen-target\n' > "$dir/valid-marker-target"
+  local bad_kind
+  for bad_kind in empty corrupt symlink; do
+    rm -f "$state/.watcher-down"
+    case "$bad_kind" in
+      empty) : > "$state/.watcher-down" ;;
+      corrupt) printf 'not-a-valid-token\n' > "$state/.watcher-down" ;;
+      symlink) ln -s "$dir/valid-marker-target" "$state/.watcher-down" ;;
+    esac
+    : > "$state/.wake-queue"
+    rc=0
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" ack-already-drained || rc=$?
+    expect_code 1 "$rc" "ack-already-drained must fail closed on $bad_kind .watcher-down"
+    rc=0
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" auto-ack-noop-heartbeat || rc=$?
+    expect_code 1 "$rc" "auto-ack-noop-heartbeat (empty queue) must fail closed on $bad_kind .watcher-down"
+    append_wake "$state" heartbeat heartbeat heartbeat
+    rc=0
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" auto-ack-noop-heartbeat || rc=$?
+    expect_code 1 "$rc" "auto-ack-noop-heartbeat (heartbeat row) must fail closed on $bad_kind .watcher-down"
+    [ -s "$state/.wake-queue" ] || fail "auto-ack-noop-heartbeat consumed queue on $bad_kind .watcher-down"
+  done
+  rm -f "$state/.watcher-down"
+
+  # 3c4. Concurrent marker rotation causing fm_recovery_marker_ack failure MUST return 1.
+  : > "$state/.wake-queue"
+  printf 'announced:handling:gen-old\n' > "$state/.watcher-down"
+  rc=0
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    set -u
+    . "$1"
+    fm_recovery_marker_ack() {
+      printf "pending:downtime:gen-rotated\n" > "$1"
+      _fm_recovery_marker_ack "$@"
+    }
+    fm_change_ack_already_drained "$2"
+  ' _ "$DETECT" "$state" || rc=$?
+  expect_code 1 "$rc" "fm_change_ack_already_drained must fail closed when ack fails on rotated generation"
+  grep -Fq 'pending:downtime:gen-rotated' "$state/.watcher-down" \
+    || fail "rotated recovery marker was overwritten during ack-already-drained"
+
+  append_wake "$state" heartbeat heartbeat heartbeat
+  printf 'announced:handling:gen-old2\n' > "$state/.watcher-down"
+  rc=0
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    set -u
+    . "$1"
+    fm_recovery_marker_ack() {
+      printf "pending:downtime:gen-rotated2\n" > "$1"
+      _fm_recovery_marker_ack "$@"
+    }
+    fm_change_auto_ack_noop_heartbeat "$2"
+  ' _ "$DETECT" "$state" || rc=$?
+  expect_code 1 "$rc" "fm_change_auto_ack_noop_heartbeat must fail closed when ack fails on rotated generation"
+  grep -Fq 'pending:downtime:gen-rotated2' "$state/.watcher-down" \
+    || fail "rotated recovery marker was overwritten during auto-ack-noop-heartbeat"
   rm -f "$state/.watcher-down"
 
   # 3d. Expired paused: ... until <past> with unchanged digest & EOF marker -> refused!
@@ -619,7 +687,8 @@ SH
 
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
     FM_WATCH_EXTENSION_LOG_KEEP_LINES=50 node --input-type=module 2>&1 <<'EOF'
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const home = process.env.FM_HOME;
@@ -730,6 +799,48 @@ const decision = await runCase(
 if (decision.mainPrompts.length !== 1) {
   throw new Error(`real needs-decision did not wake main: main=${decision.mainPrompts.length}`);
 }
+
+// 6. Direct preDeliveryZeroChangeCheck fail-closed behavior on corrupt/empty/symlink/unackable markers
+//    even when bin/fm-change-detect.sh is absent.
+const dispatch = await import(pathToFileURL(`${dirname(process.env.PLUGIN)}/lib/fm-branch-dispatch.ts`).href);
+const noDetectRoot = `${home}/no-detect-root`;
+mkdirSync(noDetectRoot, { recursive: true });
+const emptyScope = {
+  status: "empty",
+  eligible: false,
+  projects: [],
+  eligibleSeqs: [],
+  eligibleTasks: [],
+  corrupted: false,
+  needsDecisionKeys: [],
+  checkSeqs: [],
+  heartbeatSeqs: [],
+  totalRows: 0,
+  taskByWakeKey: {},
+};
+writeFileSync(`${home}/valid-marker`, "acked:handling:gen-sym\n");
+for (const [label, prep] of [
+  ["empty", () => writeFileSync(`${state}/.watcher-down`, "")],
+  ["corrupt", () => writeFileSync(`${state}/.watcher-down`, "garbage\n")],
+  ["missing-newline", () => writeFileSync(`${state}/.watcher-down`, "acked:handling:gen-1")],
+  ["symlink", () => symlinkSync(`${home}/valid-marker`, `${state}/.watcher-down`)],
+  ["unackable-handling", () => writeFileSync(`${state}/.watcher-down`, "announced:handling:gen-2\n")],
+  ["pending-downtime", () => writeFileSync(`${state}/.watcher-down`, "pending:downtime:gen-3\n")],
+]) {
+  try { unlinkSync(`${state}/.watcher-down`); } catch {}
+  prep();
+  const verdict = await dispatch.preDeliveryZeroChangeCheck(state, `signal: ${state}/alpha.status`, emptyScope, noDetectRoot, home);
+  if (verdict !== "deliver") {
+    throw new Error(`preDeliveryZeroChangeCheck failed open on ${label} marker without detect script: got ${verdict}`);
+  }
+}
+try { unlinkSync(`${state}/.watcher-down`); } catch {}
+writeFileSync(`${state}/.watcher-down`, "acked:handling:gen-ok\n");
+const ackedVerdict = await dispatch.preDeliveryZeroChangeCheck(state, `signal: ${state}/alpha.status`, emptyScope, noDetectRoot, home);
+if (ackedVerdict !== "already-drained") {
+  throw new Error(`preDeliveryZeroChangeCheck rejected valid acked:handling marker: got ${ackedVerdict}`);
+}
+try { unlinkSync(`${state}/.watcher-down`); } catch {}
 
 process.exit(0);
 EOF

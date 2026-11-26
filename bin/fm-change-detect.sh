@@ -548,21 +548,37 @@ fm_change_heartbeat_is_noop() {  # <state>
   return 0
 }
 
-_fm_cd_recovery_marker_check_and_ack_handling() {  # <recovery-path>
-  local recovery=$1 token
+_fm_cd_recovery_marker_snapshot_allowed() {  # <recovery-path>
+  local recovery=$1
+  FM_CD_RECOVERY_TOKEN=''
   if [ -e "$recovery" ] || [ -L "$recovery" ]; then
     fm_recovery_marker_snapshot "$recovery" || return 1
-    token=$FM_RECOVERY_MARKER_TOKEN
-    case "$token" in
-      pending:downtime:*|announced:downtime:*)
-        return 1
+    case "$FM_RECOVERY_MARKER_TOKEN" in
+      acked:handling:*|acked:downtime:*|pending:handling:*|announced:handling:*)
+        FM_CD_RECOVERY_TOKEN=$FM_RECOVERY_MARKER_TOKEN
         ;;
-      pending:handling:*|announced:handling:*)
-        fm_recovery_marker_ack "$recovery" "${token##*:}" >/dev/null 2>&1 || true
+      *)
+        return 1
         ;;
     esac
   fi
   return 0
+}
+
+_fm_cd_recovery_marker_ack_handling_if_needed() {  # <recovery-path> <token>
+  local recovery=$1 token=$2
+  case "$token" in
+    pending:handling:*|announced:handling:*)
+      fm_recovery_marker_ack "$recovery" "${token##*:}" >/dev/null 2>&1 || return 1
+      ;;
+  esac
+  return 0
+}
+
+_fm_cd_recovery_marker_check_and_ack_handling() {  # <recovery-path>
+  local recovery=$1
+  _fm_cd_recovery_marker_snapshot_allowed "$recovery" || return 1
+  _fm_cd_recovery_marker_ack_handling_if_needed "$recovery" "$FM_CD_RECOVERY_TOKEN"
 }
 
 # Under the wake-queue lock, confirm .wake-queue is empty, refuse any
@@ -636,22 +652,12 @@ fm_change_auto_ack_noop_heartbeat() {  # <state>
     return 1
   fi
 
-  # Never auto-ack when a pending or announced downtime recovery is active.
-  if [ -e "$recovery" ] || [ -L "$recovery" ]; then
-    if ! fm_recovery_marker_snapshot "$recovery"; then
-      fm_lock_release "$lock"
-      return 1
-    fi
-    token=$FM_RECOVERY_MARKER_TOKEN
-    case "$token" in
-      pending:downtime:*|announced:downtime:*)
-        fm_lock_release "$lock"
-        return 1
-        ;;
-    esac
-  else
-    token=''
+  # Never auto-ack when a pending/announced downtime or invalid recovery marker is present.
+  if ! _fm_cd_recovery_marker_snapshot_allowed "$recovery"; then
+    fm_lock_release "$lock"
+    return 1
   fi
+  token=$FM_CD_RECOVERY_TOKEN
 
   if ! fm_change_heartbeat_is_noop "$state"; then
     fm_lock_release "$lock"
@@ -667,11 +673,10 @@ fm_change_auto_ack_noop_heartbeat() {  # <state>
     fm_lock_release "$lock"
     return 1
   fi
-  case "$token" in
-    pending:handling:*|announced:handling:*)
-      fm_recovery_marker_ack "$recovery" "${token##*:}" >/dev/null 2>&1 || true
-      ;;
-  esac
+  if ! _fm_cd_recovery_marker_ack_handling_if_needed "$recovery" "$token"; then
+    fm_lock_release "$lock"
+    return 1
+  fi
   fm_lock_release "$lock"
   return 0
 }
