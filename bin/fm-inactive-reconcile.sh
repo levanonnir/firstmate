@@ -106,6 +106,8 @@ CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=/dev/null # Analyzed separately as a canonical lint root.
+. "$SCRIPT_DIR/fm-change-detect.sh"
 
 FM_INACTIVE_RECONCILE_SECS=${FM_INACTIVE_RECONCILE_SECS:-900}
 case "$FM_INACTIVE_RECONCILE_SECS" in
@@ -524,6 +526,9 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     'state: failed '*) state='failed' ;;
     *) return 0 ;;
   esac
+  if [ -z "$self" ] && fm_change_task_terminal_already_presented "$STATE" "$id" "$state"; then
+    return 0
+  fi
   pr=$(pr_for_task "$meta")
   incarnation=$(meta_incarnation "$meta")
   # The receipt identity binds structured fields only: a persistent child that

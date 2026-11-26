@@ -966,6 +966,9 @@ if [ -n "$ACK_THROUGH" ]; then
   elif [ "$RECOVERY_ACK_MOVED" = true ]; then
     printf 'wake drain: acknowledged wakes through %s (%s row(s) consumed), but a newer recovery episode is pending; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command\n' \
       "$ACK_THROUGH" "$ACK_REMOVED" >&2
+  elif [ ! -s "$FM_WAKE_QUEUE" ] && [ -x "$SCRIPT_DIR/fm-change-detect.sh" ]; then
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-change-detect.sh" mark-reviewed >/dev/null 2>&1 || true
   fi
   exit 0
 fi

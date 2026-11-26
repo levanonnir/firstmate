@@ -380,7 +380,7 @@ An authorization addressed to main (for example "you may merge when green") does
 
 ## Two-stage noise filter
 
-Stage one is unchanged: the bash watcher absorbs everything provably fine at zero token cost.
+Stage one is the zero-token filter: `bin/fm-watch.sh` absorbs provably fine wakes before queueing, and `.pi/extensions/fm-primary-pi-watch.ts` runs `preDeliveryZeroChangeCheck` (owned by `.pi/extensions/lib/fm-branch-dispatch.ts` and `bin/fm-change-detect.sh`) before `offerWakeToBranch` to absorb `already-drained` closes and `noop-heartbeat` closes whose fleet-state digest matches `state/.fleet-state-digest` without opening a branch or main turn.
 Stage two is the branch's verdict on each handled event, reported through its `fm_branch_report` tool:
 
 | Verdict | Delivery |
@@ -465,7 +465,7 @@ Main can read the durable outcome store on demand through its `fm_branch_outcome
 
 ## Heartbeat routing
 
-The cheap bash-level heartbeat scan absorbs a genuinely no-op pass before it reaches Pi, unchanged from before.
+The cheap bash-level heartbeat scan absorbs a genuinely no-op pass before it reaches Pi, and `preDeliveryZeroChangeCheck` absorbs a bare `heartbeat` wake that reaches Pi with only heartbeat rows queued when `bin/fm-change-detect.sh auto-ack-noop-heartbeat` proves the fleet-state digest unchanged and consumes those rows under the queue lock.
 Only a scan already flagged as possibly captain-relevant emits the bare `heartbeat` wake.
 `.pi/extensions/fm-primary-pi-watch.ts` flags that offer `heartbeat: true`.
 The branch accepts it without a project only when every branch-ownable row observed in the unread-queue eligibility check is one of these:

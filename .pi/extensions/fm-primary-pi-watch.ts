@@ -47,6 +47,8 @@ import {
   branchOfferForWake,
   createBranchDispatchOffer,
   FM_BRANCH_DISPATCH_EVENT,
+  preDeliveryZeroChangeCheck,
+  type BranchOfferVerdict,
 } from "./lib/fm-branch-dispatch.ts";
 import {
   type CalmPresentationState,
@@ -713,10 +715,10 @@ export default function (pi: ExtensionAPI) {
     return confirmHandlingDelivery(recovery);
   }
 
-  function offerWakeToBranch(message: string): Promise<void> | null {
+  function offerWakeToBranch(message: string, verdict: BranchOfferVerdict): Promise<void> | null {
     // lib/fm-branch-dispatch.ts owns the offer rule for one close, shared with
     // the supervision host off Pi (bin/fm-branch-dispatch.mjs offer).
-    const { scope, heartbeat, eligible, awayOnly } = branchOfferForWake(state, message, afkPostureRecordPresent(state));
+    const { scope, heartbeat, eligible, awayOnly } = verdict;
     const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible, awayOnly);
     pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
     return offer.accepted ? offer.settlement : null;
@@ -755,7 +757,13 @@ export default function (pi: ExtensionAPI) {
       }
     }
     if (!repairFailed) {
-      const branchDelivery = offerWakeToBranch(message);
+      const verdict = branchOfferForWake(state, message, afkPostureRecordPresent(state));
+      const preCheck = await preDeliveryZeroChangeCheck(state, message, verdict.scope, fmRoot, fmHome);
+      if (preCheck !== "deliver") {
+        appendExtensionLog(`absorbed wake reason=${preCheck} message=${message}`);
+        return true;
+      }
+      const branchDelivery = offerWakeToBranch(message, verdict);
       if (branchDelivery) {
         try {
           await branchDelivery;
