@@ -605,13 +605,24 @@ export async function preDeliveryZeroChangeCheck(
   if (/^check:\s*rearm-resurface\b/.test(message)) return "deliver";
   if (scope.corrupted) return "deliver";
   const downtime = downtimeRecoveryMarkerState(state);
-  if (downtime === "unreadable" || downtime === "announced") return "deliver";
+  if (downtime !== "none") return "deliver";
+  const changeDetectScript = join(fmRoot, "bin", "fm-change-detect.sh");
   if (scope.status === "empty") {
-    return downtime === "pending" ? "deliver" : "already-drained";
+    if (existsSync(changeDetectScript)) {
+      const result = await runCommandAsync("bash", [changeDetectScript, "ack-already-drained"], {
+        env: {
+          ...process.env,
+          FM_HOME: fmHome,
+          FM_ROOT_OVERRIDE: fmRoot,
+          FM_STATE_OVERRIDE: state,
+        },
+      });
+      return result.status === 0 ? "already-drained" : "deliver";
+    }
+    return "already-drained";
   }
   const heartbeat = /^heartbeat($|:)/.test(message);
   if (heartbeat && scope.totalRows > 0 && scope.totalRows === scope.heartbeatSeqs.length) {
-    const changeDetectScript = join(fmRoot, "bin", "fm-change-detect.sh");
     if (existsSync(changeDetectScript)) {
       const result = await runCommandAsync("bash", [changeDetectScript, "auto-ack-noop-heartbeat"], {
         env: {

@@ -415,8 +415,24 @@ test_fleet_digest_determinism_and_change_sensitivity() {
   d3=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" digest)
   mkdir -p "$state/alpha.inbox"
   printf 'steer\n' > "$state/alpha.inbox/001.msg"
-  [ "$d3" != "$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" digest)" ] \
+  local d4
+  d4=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" digest)
+  [ "$d3" != "$d4" ] \
     || fail "new unread steering inbox message did not change fleet digest"
+
+  # Replacing 001.msg with 002.msg (count remains 1) -> MUST change digest.
+  rm -f "$state/alpha.inbox/001.msg"
+  printf 'steer\n' > "$state/alpha.inbox/002.msg"
+  [ "$d4" != "$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" digest)" ] \
+    || fail "replacing steering inbox 001.msg with 002.msg collided in fleet digest"
+
+  # Unsupported --with-crew-state option must be rejected with usage exit 2.
+  rc=0; FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" snapshot --with-crew-state >/dev/null 2>&1 || rc=$?
+  expect_code 2 "$rc" "snapshot --with-crew-state must exit 2"
+  rc=0; FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" digest --with-crew-state >/dev/null 2>&1 || rc=$?
+  expect_code 2 "$rc" "digest --with-crew-state must exit 2"
+  rc=0; FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" check --with-crew-state >/dev/null 2>&1 || rc=$?
+  expect_code 2 "$rc" "check --with-crew-state must exit 2"
   pass "fleet state digest is stable across volatile files and sensitive to every actionable change"
 }
 
@@ -440,6 +456,7 @@ test_drain_ack_records_digest_and_auto_ack_noop_heartbeat() {
 
   # 1. Pure heartbeat row with unchanged fleet digest -> auto-acked cleanly.
   append_wake "$state" heartbeat heartbeat heartbeat
+  rm -f "$state/.watcher-down"
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" auto-ack-noop-heartbeat \
     || fail "auto-ack-noop-heartbeat refused a pure unchanged heartbeat"
   [ ! -s "$state/.wake-queue" ] || fail "auto-ack-noop-heartbeat left rows in .wake-queue"
@@ -447,12 +464,13 @@ test_drain_ack_records_digest_and_auto_ack_noop_heartbeat() {
   # 2. Mixed queue (heartbeat + signal) -> refused, rows preserved!
   append_wake "$state" heartbeat heartbeat heartbeat
   append_wake "$state" signal 'alpha.status' "signal: $state/alpha.status"
+  rm -f "$state/.watcher-down"
   rc=0
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" auto-ack-noop-heartbeat || rc=$?
   expect_code 1 "$rc" "auto-ack-noop-heartbeat must refuse when non-heartbeat rows are queued"
   [ "$(wc -l < "$state/.wake-queue" | tr -d ' ')" -eq 2 ] || fail "mixed queue rows were mutated on refusal"
 
-  # 3. Pure heartbeat with announced downtime recovery -> refused!
+  # 3. Pure heartbeat with announced OR pending downtime recovery -> refused!
   : > "$state/.wake-queue"
   append_wake "$state" heartbeat heartbeat heartbeat
   printf 'announced:downtime:gen-123\n' > "$state/.watcher-down"
@@ -460,6 +478,58 @@ test_drain_ack_records_digest_and_auto_ack_noop_heartbeat() {
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" auto-ack-noop-heartbeat || rc=$?
   expect_code 1 "$rc" "auto-ack-noop-heartbeat must refuse while downtime recovery is announced"
   [ -s "$state/.wake-queue" ] || fail "downtime-pending heartbeat was wrongly consumed"
+  printf 'pending:downtime:gen-124\n' > "$state/.watcher-down"
+  rc=0
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" auto-ack-noop-heartbeat || rc=$?
+  expect_code 1 "$rc" "auto-ack-noop-heartbeat must refuse while downtime recovery is pending"
+  [ -s "$state/.wake-queue" ] || fail "pending-downtime heartbeat was wrongly consumed"
+  grep -Fq 'pending:downtime:gen-124' "$state/.watcher-down" || fail "pending:downtime marker was altered on refusal"
+
+  # 3b. Pure heartbeat with announced:handling:* -> auto-acked AND handling marker retired!
+  printf 'announced:handling:gen-125\n' > "$state/.watcher-down"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" auto-ack-noop-heartbeat \
+    || fail "auto-ack-noop-heartbeat refused announced:handling:* on unchanged fleet"
+  [ ! -s "$state/.wake-queue" ] || fail "auto-ack-noop-heartbeat left rows with announced:handling:*"
+  grep -Fq 'acked:handling:gen-125' "$state/.watcher-down" \
+    || fail "auto-ack-noop-heartbeat did not retire announced:handling:*: $(cat "$state/.watcher-down")"
+  rm -f "$state/.watcher-down"
+
+  # 3c. ack-already-drained retires announced:handling:* on empty queue and refuses pending:downtime:*.
+  : > "$state/.wake-queue"
+  printf 'announced:handling:gen-126\n' > "$state/.watcher-down"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" ack-already-drained \
+    || fail "ack-already-drained refused empty queue with announced:handling:*"
+  grep -Fq 'acked:handling:gen-126' "$state/.watcher-down" \
+    || fail "ack-already-drained did not retire announced:handling:*"
+  printf 'pending:downtime:gen-127\n' > "$state/.watcher-down"
+  rc=0
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" ack-already-drained || rc=$?
+  expect_code 1 "$rc" "ack-already-drained must refuse pending:downtime:*"
+  rm -f "$state/.watcher-down"
+
+  # 3d. Expired paused: ... until <past> with unchanged digest & EOF marker -> refused!
+  local past_iso
+  past_iso=$(date -u -r "$(( $(date +%s) - 120 ))" '+%Y-%m-%dT%H:%MZ' 2>/dev/null \
+    || date -u -d "@$(( $(date +%s) - 120 ))" '+%Y-%m-%dT%H:%MZ')
+  printf 'paused: waiting on timer until %s\n' "$past_iso" > "$state/alpha.status"
+  mark_status_seen "$state" "$state/alpha.status"
+  mark_hb_surfaced "$state" alpha
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" mark-reviewed || fail "mark-reviewed failed for paused until test"
+  append_wake "$state" heartbeat heartbeat heartbeat
+  rm -f "$state/.watcher-down"
+  rc=0
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" check --heartbeat >/dev/null || rc=$?
+  expect_code 1 "$rc" "check --heartbeat must report changed when paused until expired"
+  rc=0
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" auto-ack-noop-heartbeat || rc=$?
+  expect_code 1 "$rc" "auto-ack-noop-heartbeat must refuse when paused until expired"
+  [ -s "$state/.wake-queue" ] || fail "expired-paused heartbeat was wrongly consumed"
+  : > "$state/.wake-queue"
+  printf 'working: building\n' > "$state/alpha.status"
+  mark_status_seen "$state" "$state/alpha.status"
+  mark_hb_surfaced "$state" alpha
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DETECT" mark-reviewed || fail "mark-reviewed restore failed"
+  append_wake "$state" heartbeat heartbeat heartbeat
   rm -f "$state/.watcher-down"
 
   # 4. Pure heartbeat after a real actionable status change -> refused!
@@ -588,7 +658,8 @@ async function runCase(name, closeLine, queueContent, setup = () => {}) {
   await tool.execute(`arm-${name}`, {}, undefined, undefined, {});
   for (let i = 0; i < 200; i += 1) {
     const arms = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((r) => r.startsWith("arm=")).length;
-    if (arms >= 2 && (offers.length > 0 || mainPrompts.length > 0 || i >= 40)) break;
+    const ext = (() => { try { return readFileSync(`${state}/.watch-extension.log`, "utf8"); } catch { return ""; } })();
+    if (arms >= 2 && (offers.length > 0 || mainPrompts.length > 0 || ext.includes("absorbed wake reason="))) break;
     await new Promise((r) => setTimeout(r, 15));
   }
   writeFileSync(process.env.FM_STOP_FILE, "stop\n");
@@ -598,16 +669,30 @@ async function runCase(name, closeLine, queueContent, setup = () => {}) {
     mainPrompts,
     queueAfter: readFileSync(`${state}/.wake-queue`, "utf8"),
     extLog: (() => { try { return readFileSync(`${state}/.watch-extension.log`, "utf8"); } catch { return ""; } })(),
+    watcherDown: (() => { try { return readFileSync(`${state}/.watcher-down`, "utf8").trim(); } catch { return ""; } })(),
   };
 }
 
-// 1. Already-drained wake queue on a signal close -> zero branch offers, zero main prompts!
-const drained = await runCase("already-drained", `signal: ${state}/alpha.status`, "");
+// 1. Already-drained wake queue on a signal close with announced:handling:* -> zero LLM turns AND retires handling marker!
+const drained = await runCase("already-drained", `signal: ${state}/alpha.status`, "", () => {
+  writeFileSync(`${state}/.watcher-down`, "announced:handling:fixture-gen\n");
+});
 if (drained.offers.length !== 0 || drained.mainPrompts.length !== 0) {
   throw new Error(`already-drained signal woke an LLM: offers=${drained.offers.length} main=${drained.mainPrompts.length}`);
 }
 if (!drained.extLog.includes("absorbed wake reason=already-drained")) {
   throw new Error(`expected already-drained absorption log, got: ${drained.extLog}`);
+}
+if (drained.watcherDown !== "acked:handling:fixture-gen") {
+  throw new Error(`already-drained left .watcher-down un-acked: ${drained.watcherDown}`);
+}
+
+// 1b. Pure heartbeat with pending:downtime:* MUST deliver (never swallowed)!
+const pendingDowntimeHb = await runCase("pending-downtime-hb", "heartbeat", "1\t10\theartbeat\theartbeat\theartbeat\n", () => {
+  writeFileSync(`${state}/.watcher-down`, "pending:downtime:dt-gen\n");
+});
+if (pendingDowntimeHb.offers.length !== 1 || pendingDowntimeHb.queueAfter.trim() === "") {
+  throw new Error(`pending:downtime heartbeat was wrongly swallowed: offers=${pendingDowntimeHb.offers.length} queue=${pendingDowntimeHb.queueAfter}`);
 }
 
 // 2. Pure no-op heartbeat with reviewed digest -> auto-acked, zero LLM turns!

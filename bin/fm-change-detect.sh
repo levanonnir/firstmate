@@ -18,12 +18,13 @@
 # bin/fm-wake-drain.sh, and executable directly as a zero-token CLI tool:
 #
 # Usage:
-#   fm-change-detect.sh snapshot [--with-crew-state]
-#   fm-change-detect.sh digest [--with-crew-state]
-#   fm-change-detect.sh check [--heartbeat] [--with-crew-state]
+#   fm-change-detect.sh snapshot
+#   fm-change-detect.sh digest
+#   fm-change-detect.sh check [--heartbeat]
 #   fm-change-detect.sh mark-reviewed
 #   fm-change-detect.sh pr-ready-parked <task-id>
 #   fm-change-detect.sh auto-ack-noop-heartbeat
+#   fm-change-detect.sh ack-already-drained
 #   fm-change-detect.sh --help
 #
 # Exit codes for `check`:
@@ -110,14 +111,27 @@ fm_change_task_has_unread_inbox() {  # <state> <task>
   return 1
 }
 
-_fm_cd_task_unread_inbox_count() {  # <state> <task>
-  local state=$1 task=$2 msg count=0
+_fm_cd_task_unread_inbox_digest() {  # <state> <task>
+  local state=$1 task=$2 f msg_name msg_size msg_hash
+  local -a msg_list=()
   if [ -d "$state/$task.inbox" ] && [ ! -L "$state/$task.inbox" ]; then
-    for msg in "$state/$task.inbox"/*.msg; do
-      [ -f "$msg" ] && [ ! -L "$msg" ] && count=$((count + 1))
+    for f in "$state/$task.inbox"/*.msg; do
+      [ -f "$f" ] && [ ! -L "$f" ] || continue
+      msg_list+=("${f##*/}")
     done
   fi
-  printf '%s' "$count"
+  if [ "${#msg_list[@]}" -eq 0 ]; then
+    printf '0'
+    return 0
+  fi
+  {
+    while IFS= read -r msg_name; do
+      [ -n "$msg_name" ] || continue
+      msg_size=$(_fm_cd_file_size "$state/$task.inbox/$msg_name")
+      msg_hash=$(_fm_cd_file_sha256 "$state/$task.inbox/$msg_name")
+      printf '%s\t%s:%s\n' "$msg_name" "$msg_size" "$msg_hash"
+    done < <(printf '%s\n' "${msg_list[@]}" | LC_ALL=C sort)
+  } | _fm_cd_sha256
 }
 
 # 0 iff <task> is a finished, already-registered PR-ready ship waiting for
@@ -295,13 +309,12 @@ fm_change_signal_turnend_zero_change() {  # <state> <file>...
 # state under <state>. Excludes volatile timestamps, liveness beacons, and pane
 # hashes so idle clock ticks never cause false diffs, while capturing every
 # actionable task, status, decision, PR, inbox, and pending-outcome fact.
-fm_change_fleet_snapshot() {  # <state> [--with-crew-state]
-  local state=$1 with_crew=0
-  [ "${2:-}" = --with-crew-state ] && with_crew=1
+fm_change_fleet_snapshot() {  # <state>
+  local state=$1
   local LC_ALL=C exclude poll_script meta id kind mode yolo pr pr_head spawn_gen
   local status status_sig status_size status_lines status_hash last_line wait_line
   local open_dec open_hash hb_marker hb_off cur_off pr_armed pr_merged pr_retired
-  local inbox_cnt crew_line f note_name note_size note_hash pending_name
+  local inbox_sig f note_name note_size note_hash pending_name
   local seen_tasks=' '
   local -a meta_list=() status_list=() note_list=() pending_list=()
 
@@ -368,17 +381,13 @@ fm_change_fleet_snapshot() {  # <state> [--with-crew-state]
           pr_retired=1
         fi
       fi
-      inbox_cnt=$(_fm_cd_task_unread_inbox_count "$state" "$id")
+      inbox_sig=$(_fm_cd_task_unread_inbox_digest "$state" "$id")
 
       printf 'task\t%s\tkind=%s\tmode=%s\tyolo=%s\tgen=%s\tpr=%s\tpr_head=%s\tpr_armed=%s\tpr_merged=%s\tpr_retired=%s\tinbox=%s\tstatus=%s:%s:%s:%s\topen=%s\thb=%s\tcur=%s\tlast=%s\twait=%s\n' \
         "$id" "$kind" "$mode" "$yolo" "$spawn_gen" "$pr" "$pr_head" \
-        "$pr_armed" "$pr_merged" "$pr_retired" "$inbox_cnt" \
+        "$pr_armed" "$pr_merged" "$pr_retired" "$inbox_sig" \
         "$status_sig" "$status_size" "$status_lines" "$status_hash" \
         "$open_hash" "$hb_off" "$cur_off" "$last_line" "$wait_line"
-      if [ "$with_crew" -eq 1 ]; then
-        crew_line=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_NO_FORGE=1 "${FM_CREW_STATE_BIN:-$_FM_CD_DIR/fm-crew-state.sh}" "$id" 2>/dev/null | tr '\t\r\n' '   ' || true)
-        printf 'crew_state\t%s\t%s\n' "$id" "$crew_line"
-      fi
     done < <(printf '%s\n' "${meta_list[@]}" | LC_ALL=C sort)
   fi
 
@@ -442,8 +451,8 @@ fm_change_fleet_snapshot() {  # <state> [--with-crew-state]
   fi
 }
 
-fm_change_fleet_digest() {  # <state> [--with-crew-state]
-  fm_change_fleet_snapshot "$@" | _fm_cd_sha256
+fm_change_fleet_digest() {  # <state>
+  fm_change_fleet_snapshot "$1" | _fm_cd_sha256
 }
 
 fm_change_fleet_digest_path() {  # <state>
@@ -452,13 +461,13 @@ fm_change_fleet_digest_path() {  # <state>
 
 # 0 iff a reviewed digest exists at state/.fleet-state-digest and matches the
 # current deterministic fleet state digest byte-for-byte.
-fm_change_fleet_digest_matches_reviewed() {  # <state> [--with-crew-state]
-  local state=$1 with_crew=${2:-} path stored current
+fm_change_fleet_digest_matches_reviewed() {  # <state>
+  local state=$1 path stored current
   path=$(fm_change_fleet_digest_path "$state")
   [ -f "$path" ] && [ -r "$path" ] && [ ! -L "$path" ] || return 1
   stored=$(cat "$path" 2>/dev/null || true)
   case "$stored" in ''|*[!0-9a-f]*) return 1 ;; esac
-  current=$(fm_change_fleet_digest "$state" ${with_crew:+"$with_crew"}) || return 1
+  current=$(fm_change_fleet_digest "$state") || return 1
   [ -n "$current" ] && [ "$stored" = "$current" ]
 }
 
@@ -511,7 +520,7 @@ _fm_cd_has_unsurfaced_actionable_status() {  # <state>
 #   - zero pending terminal outcomes;
 #   - zero unsurfaced actionable status spans.
 fm_change_heartbeat_is_noop() {  # <state>
-  local state=$1 f
+  local state=$1 f exclude now wait_line until
   fm_change_fleet_digest_matches_reviewed "$state" || return 1
   if [ -d "$state/inbox" ] && [ ! -L "$state/inbox" ]; then
     for f in "$state/inbox"/*.note; do
@@ -523,7 +532,62 @@ fm_change_heartbeat_is_noop() {  # <state>
       [ -f "$f" ] && [ ! -L "$f" ] && return 1
     done
   fi
+  exclude=$(status_scan_parent_channel_exclude "$state")
+  now=$(date +%s)
+  for f in "$state"/*.status; do
+    [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
+    [ "$f" = "$exclude" ] && continue
+    wait_line=$(status_declared_wait_line "$f")
+    if status_is_paused "$wait_line"; then
+      if until=$(status_paused_until "$wait_line") && [ "$now" -ge "$until" ]; then
+        return 1
+      fi
+    fi
+  done
   ! _fm_cd_has_unsurfaced_actionable_status "$state" || return 1
+  return 0
+}
+
+_fm_cd_recovery_marker_check_and_ack_handling() {  # <recovery-path>
+  local recovery=$1 token
+  if [ -e "$recovery" ] || [ -L "$recovery" ]; then
+    fm_recovery_marker_snapshot "$recovery" || return 1
+    token=$FM_RECOVERY_MARKER_TOKEN
+    case "$token" in
+      pending:downtime:*|announced:downtime:*)
+        return 1
+        ;;
+      pending:handling:*|announced:handling:*)
+        fm_recovery_marker_ack "$recovery" "${token##*:}" >/dev/null 2>&1 || true
+        ;;
+    esac
+  fi
+  return 0
+}
+
+# Under the wake-queue lock, confirm .wake-queue is empty, refuse any
+# pending/announced/unreadable downtime recovery, and retire any
+# pending/announced handling marker.
+fm_change_ack_already_drained() {  # <state>
+  local state=$1 queue lock recovery
+  # shellcheck disable=SC2034 # Used by sourced wake-lib helpers.
+  local STATE=$state
+  queue="$state/.wake-queue"
+  lock="$state/.wake-queue.lock"
+  recovery="$state/.watcher-down"
+
+  [ -f "$queue" ] && [ ! -L "$queue" ] || return 1
+  fm_lock_acquire_wait_bounded "$lock" 5 || return 1
+
+  if [ ! -f "$queue" ] || [ -L "$queue" ] || [ -s "$queue" ]; then
+    fm_lock_release "$lock"
+    return 1
+  fi
+  if ! _fm_cd_recovery_marker_check_and_ack_handling "$recovery"; then
+    fm_lock_release "$lock"
+    return 1
+  fi
+  fm_lock_release "$lock"
   return 0
 }
 
@@ -547,6 +611,10 @@ fm_change_auto_ack_noop_heartbeat() {  # <state>
     return 1
   fi
   if [ ! -s "$queue" ]; then
+    if ! _fm_cd_recovery_marker_check_and_ack_handling "$recovery"; then
+      fm_lock_release "$lock"
+      return 1
+    fi
     fm_lock_release "$lock"
     return 0
   fi
@@ -568,7 +636,7 @@ fm_change_auto_ack_noop_heartbeat() {  # <state>
     return 1
   fi
 
-  # Never auto-ack when an announced downtime recovery is pending.
+  # Never auto-ack when a pending or announced downtime recovery is active.
   if [ -e "$recovery" ] || [ -L "$recovery" ]; then
     if ! fm_recovery_marker_snapshot "$recovery"; then
       fm_lock_release "$lock"
@@ -576,7 +644,7 @@ fm_change_auto_ack_noop_heartbeat() {  # <state>
     fi
     token=$FM_RECOVERY_MARKER_TOKEN
     case "$token" in
-      announced:downtime:*)
+      pending:downtime:*|announced:downtime:*)
         fm_lock_release "$lock"
         return 1
         ;;
@@ -600,7 +668,7 @@ fm_change_auto_ack_noop_heartbeat() {  # <state>
     return 1
   fi
   case "$token" in
-    pending:downtime:*|pending:handling:*|announced:handling:*)
+    pending:handling:*|announced:handling:*)
       fm_recovery_marker_ack "$recovery" "${token##*:}" >/dev/null 2>&1 || true
       ;;
   esac
@@ -613,19 +681,19 @@ _fm_cd_usage() {
 usage: fm-change-detect.sh <command> [options]
 
 Commands:
-  snapshot [--with-crew-state]         Print deterministic fleet state snapshot
-  digest [--with-crew-state]           Print SHA-256 digest of fleet state snapshot
-  check [--heartbeat] [--with-crew-state]
-                                       Exit 0 (unchanged) or 1 (changed) vs reviewed digest
+  snapshot                             Print deterministic fleet state snapshot
+  digest                               Print SHA-256 digest of fleet state snapshot
+  check [--heartbeat]                  Exit 0 (unchanged) or 1 (changed) vs reviewed digest
   mark-reviewed                        Record current fleet digest as reviewed
   pr-ready-parked <task-id>            Exit 0 if task is PR-ready with armed merge poll
   auto-ack-noop-heartbeat              Locked auto-ack of pure no-op heartbeat queue rows
+  ack-already-drained                  Locked handling-marker ack when queue is already empty
   --help                               Show this help
 EOF
 }
 
 _fm_cd_main() {
-  local home state cmd with_crew=0 heartbeat=0 stored current
+  local home state cmd heartbeat=0 stored current
   home="${FM_HOME:-$_FM_CD_ROOT}"
   state="${FM_STATE_OVERRIDE:-$home/state}"
   cmd=${1:-}
@@ -634,37 +702,22 @@ _fm_cd_main() {
 
   case "$cmd" in
     snapshot)
-      [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = --with-crew-state ] && with_crew=1; } \
-        || { _fm_cd_usage >&2; return 2; }
-      if [ "$with_crew" -eq 1 ]; then
-        fm_change_fleet_snapshot "$state" --with-crew-state
-      else
-        fm_change_fleet_snapshot "$state"
-      fi
+      [ "$#" -eq 0 ] || { _fm_cd_usage >&2; return 2; }
+      fm_change_fleet_snapshot "$state"
       ;;
     digest)
-      [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = --with-crew-state ] && with_crew=1; } \
-        || { _fm_cd_usage >&2; return 2; }
-      if [ "$with_crew" -eq 1 ]; then
-        fm_change_fleet_digest "$state" --with-crew-state
-      else
-        fm_change_fleet_digest "$state"
-      fi
+      [ "$#" -eq 0 ] || { _fm_cd_usage >&2; return 2; }
+      fm_change_fleet_digest "$state"
       ;;
     check)
       while [ "$#" -gt 0 ]; do
         case "$1" in
           --heartbeat) heartbeat=1 ;;
-          --with-crew-state) with_crew=1 ;;
           *) _fm_cd_usage >&2; return 2 ;;
         esac
         shift
       done
-      if [ "$with_crew" -eq 1 ]; then
-        current=$(fm_change_fleet_digest "$state" --with-crew-state) || return 1
-      else
-        current=$(fm_change_fleet_digest "$state") || return 1
-      fi
+      current=$(fm_change_fleet_digest "$state") || return 1
       stored=$(cat "$(fm_change_fleet_digest_path "$state")" 2>/dev/null || true)
       if [ "$heartbeat" -eq 1 ]; then
         if fm_change_heartbeat_is_noop "$state"; then
@@ -692,6 +745,10 @@ _fm_cd_main() {
     auto-ack-noop-heartbeat)
       [ "$#" -eq 0 ] || { _fm_cd_usage >&2; return 2; }
       fm_change_auto_ack_noop_heartbeat "$state"
+      ;;
+    ack-already-drained)
+      [ "$#" -eq 0 ] || { _fm_cd_usage >&2; return 2; }
+      fm_change_ack_already_drained "$state"
       ;;
     -h|--help|help)
       _fm_cd_usage
