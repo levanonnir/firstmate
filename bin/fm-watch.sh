@@ -234,6 +234,11 @@ WATCH_HOME_EXISTED=0
 # and wake emission (secondmate_liveness_tick below).
 # shellcheck source=/dev/null # Analyzed separately as a canonical lint root.
 . "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
+# Deterministic zero-token change detection and pre-LLM absorption
+# (PR-ready parked workers, active declared waits on bare turn-ends, and
+# fleet-state digest checks).
+# shellcheck source=/dev/null # Analyzed separately as a canonical lint root.
+. "$SCRIPT_DIR/fm-change-detect.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -2331,7 +2336,12 @@ heartbeat_scan_finds_actionable() {
     fi
     endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
     FM_HEARTBEAT_SURFACE_ENDPOINTS="${FM_HEARTBEAT_SURFACE_ENDPOINTS}${f}"$'\t'"${endpoint}"$'\t'"${ident}"$'\n'
-    [ "$rc" -eq 0 ] && found=0
+    if [ "$rc" -eq 0 ]; then
+      if fm_change_task_pr_ready_parked "$STATE" "$task"; then
+        continue
+      fi
+      found=0
+    fi
   done
   return "$found"
 }
@@ -2997,7 +3007,9 @@ EOF
     # bin/fm-supervise-daemon.sh).
     # shellcheck disable=SC2086  # same space-separated status-path list
     if afk_present || [ "$signal_actionable" -eq 0 ] \
-      || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
+      || { ! signal_crew_provably_working $files \
+        && ! signal_turnend_panes_churned $files \
+        && ! fm_change_signal_turnend_zero_change "$STATE" $files; }; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         file_reason="$reason"
@@ -3145,6 +3157,14 @@ EOF
               date +%s > "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+            elif fm_change_task_pr_ready_parked "$STATE" "$task"; then
+              # The worker is already done with a registered PR and an armed
+              # merge poll, no open decisions, and no unread steer. Pane ticks
+              # while waiting for merge carry zero new actionable information.
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf"
+              clear_write_tracking "$key"
+              triage_log "absorbed stale (PR-ready and merge-poll armed, waiting for merge): $w"
             elif captain_call_stale_bound "$key" "$task"; then
               # The line is captain-relevant and stays so, but the backlog says
               # the captain already holds this work: further NEW pane hashes with
@@ -3317,7 +3337,11 @@ EOF
       fi
       touch "$STATE/.last-heartbeat"
       echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
-      triage_log "absorbed heartbeat (no captain-relevant change)"
+      if fm_change_fleet_digest_matches_reviewed "$STATE"; then
+        triage_log "absorbed heartbeat (fleet state digest unchanged)"
+      else
+        triage_log "absorbed heartbeat (no captain-relevant change)"
+      fi
     fi
   fi
 

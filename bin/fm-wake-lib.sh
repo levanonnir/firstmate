@@ -2333,6 +2333,8 @@ fm_wake_queue_prune_task() {  # <state> <task-id> [target]
       if ($3 == "stale" && target != "" && $4 == target) next
       if ($3 == "signal" && ($4 == task || $4 == task ".status" || $4 == task ".turn-ended" || $4 == state "/" task ".status" || $4 == state "/" task ".turn-ended")) next
       if ($3 == "check" && $4 == state "/" task ".check.sh") next
+      if ($3 == "check" && index($4, "merged-" task "-") == 1 && index($5, "check: merge landed: " task " ") == 1) next
+      if ($3 == "check" && index($4, "inactive-outcome:") == 1 && index($5, "child=" task " ") > 0) next
     }
     { print }
   ' "$queue" > "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }

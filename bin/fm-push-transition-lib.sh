@@ -159,6 +159,12 @@ handle_push_transition() {  # <backend> <session> <record>
     fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
     return
   fi
+  if command -v fm_change_task_pr_ready_parked >/dev/null 2>&1 \
+    && fm_change_task_pr_ready_parked "$STATE" "$task"; then
+    triage_log "absorbed push $to (PR-ready and merge-poll armed, waiting for merge): $window"
+    fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
+    return
+  fi
   span_record=$(status_span_first_actionable_record "$STATE/$task.status" \
     "$(hb_surfaced_offset "$task")")
   case $? in

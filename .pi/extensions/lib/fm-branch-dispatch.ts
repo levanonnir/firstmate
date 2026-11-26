@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { runCommandAsync } from "./fm-async-exec.ts";
 
@@ -141,6 +141,8 @@ export interface UnreadWakeScope {
    * non-heartbeat wake claims it in the away posture.
    */
   heartbeatSeqs: string[];
+  /** Total structurally valid rows present in .wake-queue during this scan. */
+  totalRows: number;
   taskByWakeKey: Record<string, string>;
 }
 
@@ -154,6 +156,7 @@ const EMPTY_SCOPE: UnreadWakeScope = {
   needsDecisionKeys: [],
   checkSeqs: [],
   heartbeatSeqs: [],
+  totalRows: 0,
   taskByWakeKey: {},
 };
 const UNSAFE_SCOPE: UnreadWakeScope = {
@@ -166,6 +169,7 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
   needsDecisionKeys: [],
   checkSeqs: [],
   heartbeatSeqs: [],
+  totalRows: 0,
   taskByWakeKey: {},
 };
 
@@ -564,8 +568,63 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
     needsDecisionKeys,
     checkSeqs,
     heartbeatSeqs,
+    totalRows: rows.length,
     taskByWakeKey: Object.fromEntries(taskByKey),
   };
+}
+
+export type PreDeliveryZeroChangeVerdict = "deliver" | "already-drained" | "noop-heartbeat";
+
+function downtimeRecoveryMarkerState(state: string): "none" | "pending" | "announced" | "unreadable" {
+  try {
+    const marker = readFileSync(join(state, ".watcher-down"), "utf8").trim();
+    if (/^announced:downtime:/.test(marker)) return "announced";
+    if (/^pending:downtime:/.test(marker)) return "pending";
+    return "none";
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "none" : "unreadable";
+  }
+}
+
+// Deterministic, zero-token pre-delivery gate shared with the Pi watcher
+// extension (bin/fm-change-detect.sh owns the fleet-state digest and locked
+// heartbeat auto-ack contract). Returns:
+//   - "already-drained" when .wake-queue exists and is empty, the close is not
+//     a downtime rearm-resurface, and no downtime recovery is pending;
+//   - "noop-heartbeat" when a heartbeat close finds only heartbeat rows in the
+//     queue and bin/fm-change-detect.sh auto-ack-noop-heartbeat proved an
+//     unchanged fleet digest and consumed those rows under the queue lock;
+//   - "deliver" in every other case, including missing/corrupt queue files.
+export async function preDeliveryZeroChangeCheck(
+  state: string,
+  message: string,
+  scope: UnreadWakeScope,
+  fmRoot: string,
+  fmHome: string,
+): Promise<PreDeliveryZeroChangeVerdict> {
+  if (/^check:\s*rearm-resurface\b/.test(message)) return "deliver";
+  if (scope.corrupted) return "deliver";
+  const downtime = downtimeRecoveryMarkerState(state);
+  if (downtime === "unreadable" || downtime === "announced") return "deliver";
+  if (scope.status === "empty") {
+    return downtime === "pending" ? "deliver" : "already-drained";
+  }
+  const heartbeat = /^heartbeat($|:)/.test(message);
+  if (heartbeat && scope.totalRows > 0 && scope.totalRows === scope.heartbeatSeqs.length) {
+    const changeDetectScript = join(fmRoot, "bin", "fm-change-detect.sh");
+    if (existsSync(changeDetectScript)) {
+      const result = await runCommandAsync("bash", [changeDetectScript, "auto-ack-noop-heartbeat"], {
+        env: {
+          ...process.env,
+          FM_HOME: fmHome,
+          FM_ROOT_OVERRIDE: fmRoot,
+          FM_STATE_OVERRIDE: state,
+        },
+      });
+      if (result.status === 0) return "noop-heartbeat";
+    }
+  }
+  return "deliver";
 }
 
 export interface BranchOfferVerdict {
