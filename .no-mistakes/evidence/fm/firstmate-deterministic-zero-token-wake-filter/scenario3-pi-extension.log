@@ -1,0 +1,6 @@
+=== Scenario 3: Live Pi preDeliveryZeroChangeCheck (.pi/extensions/lib/fm-branch-dispatch.ts + bin/fm-change-detect.sh) ===
+3a_already_drained verdict=already-drained marker_after=acked:handling:gen-s3-1
+3b_noop_heartbeat verdict=noop-heartbeat queue_after=""
+3c_pending_downtime verdict=deliver queue_preserved=true marker=pending:downtime:gen-s3-down
+3d_corrupt_marker verdict=deliver
+3e_symlink_marker verdict=deliver

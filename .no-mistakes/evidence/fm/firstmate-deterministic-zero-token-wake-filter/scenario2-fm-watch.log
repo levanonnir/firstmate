@@ -1,0 +1,7 @@
+=== Scenario 2: Live bin/fm-watch.sh absorption & surfacing ===
+wake_queue_bytes_during_zero_change=0
+--- watch stdout ---
+signal: /var/folders/dh/ks6tdqm57yv6p9d__x14m7y40000gn/T//fm-lab-s2.akPMNO/state/prship.status
+--- .watch-triage.log ---
+[2026-11-26T22:44:57+0200] absorbed benign signal: /var/folders/dh/ks6tdqm57yv6p9d__x14m7y40000gn/T//fm-lab-s2.akPMNO/state/prship.turn-ended
+[2026-11-26T22:44:58+0200] absorbed heartbeat (fleet state digest unchanged)

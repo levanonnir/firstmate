@@ -1,0 +1,17 @@
+=== Scenario 1: Zero-token CLI (bin/fm-change-detect.sh) & drain (bin/fm-wake-drain.sh) ===
+--- 1a. pr-ready-parked ---
+--- 1b. snapshot & digest & mark-reviewed ---
+schema=fm-fleet-snapshot.v1
+task	alpha	kind=ship	mode=	yolo=	gen=	pr=https://github.com/org/repo/pull/42	pr_head=	pr_armed=1	pr_merged=0	pr_retired=0	inbox=0	status=file:30:1:31d2b6f9a2869703427fae7148e783992eee3ab3286a357dfe0f9f4e99d8969e	open=none	hb=30	cur=0	last=done: PR #42 ready for review 	wait=
+digest=4259a8ec9c564447a0a155f47fc120d2acf34b253c0f29b594efa770df6ae9a8
+unchanged 4259a8ec9c564447a0a155f47fc120d2acf34b253c0f29b594efa770df6ae9a8
+check --heartbeat: exit 0 (unchanged)
+--- 1c. steering inbox filename/content change (count stays 1) ---
+after 001.msg->002.msg: rc=1 output=changed 9818b44e7592ac25bfe03bc913d038c1255cc188c0719c92293c60c44813982b 0d1ade536d9251329af0108e4fd4ee9f1bad2ea500c26aff3157d6017752371e
+--- 1d. expired paused-until treated as actionable ---
+expired paused-until check --heartbeat: rc=1 output=changed 6af47a8de5da09db74ad07f449d8ea224556a34608b05708b4dd138b01d22e74 6af47a8de5da09db74ad07f449d8ea224556a34608b05708b4dd138b01d22e74
+--- 1e. fm-wake-drain.sh --ack-through updates .fleet-state-digest ---
+WAKE_ACK_REQUIRED: --ack-through 1 --recovery-generation 89321.1795725847.ALPrCu
+post-drain .fleet-state-digest=4259a8ec9c564447a0a155f47fc120d2acf34b253c0f29b594efa770df6ae9a8
+unchanged 4259a8ec9c564447a0a155f47fc120d2acf34b253c0f29b594efa770df6ae9a8
+post-drain check --heartbeat: exit 0 (unchanged)
