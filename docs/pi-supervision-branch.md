@@ -196,15 +196,16 @@ An acknowledgement that consumed nothing reports that plainly, with the exact co
 
 #### Broken-branch latch and recovery
 
-1. Two consecutive settled provider errors latch the branch broken.
+1. Two consecutive unproductive turns latch the branch broken: a settled provider error or a recorded model reply without a durable report both count.
+   An interrupted or unobserved turn still falls back to main but does not count as a model failure.
    A one-line health note surfaces only on that initial trip.
 2. Main keeps every wake during a five-minute cooldown.
 3. After the cooldown, one wake may probe the branch while concurrent wakes still stay on main.
-4. Each probe that settles with another provider error doubles the next cooldown, up to one hour.
+4. Each probe that settles without a usable outcome doubles the next cooldown, up to one hour.
 
 A prompt from the current branch generation and model or effort selection can clear the latch.
 It must append a durable `fm_branch_report` and then settle without a provider error.
-That clears both the latch and the provider-error streak and surfaces a one-line recovery note.
+That clears both the latch and the unproductive-turn streak and surfaces a one-line recovery note.
 If a provider error settles after that report, the error wins instead: it re-latches the branch and extends the cooldown.
 A session replacement or branch model or effort change resets the recovery state immediately.
 
@@ -212,6 +213,7 @@ A session replacement or branch model or effort change resets the recovery state
 
 The same extension registers `/supervision-model`, which picks the branch's model and then its reasoning effort.
 It applies both at the branch-session creation boundary.
+If the configured model cannot build the branch, a one-line health note directs the captain to the picker while the watcher hands the wake back to main.
 [configuration.md](configuration.md#pi-supervision-branch-model-and-effort-configsupervision-branch-model-configsupervision-branch-effort) owns the operator-facing schema and behavior.
 
 ### Branch system prompt
@@ -646,7 +648,7 @@ At that moment the branch reports any refusal instead of concluding there is "no
 - Idle and busy main state, and incident-shaped compaction and unrelated-assistant context.
 - Cold-start post-lock recovery, crash-before-cursor reload recovery, and repeated-reload idempotency.
 - Mirroring.
-- Post-construction provider-error and no-report fallback, the consecutive-error latch, cooldown probe, exponential backoff, report-plus-settlement recovery, and report-before-error re-latch.
+- Post-construction provider-error and no-report fallback, the consecutive-unproductive-turn latch, cooldown probe, exponential backoff, report-plus-settlement recovery, and report-before-error re-latch.
 - Cache key, and model and effort selection.
 - In `test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot`: decision-owned signal and stale rows' exclusion from `eligibleSeqs`, their presence in `needsDecisionKeys`, task alias resolution, reserved-key configuration, status-log race and symlink refusal, non-vetoing behavior for unrelated eligible rows, and decision-only queues reading as ordinary main-only absence.
 - In `test_branch_dispatch_routes_secondmate_signal_by_new_span`: second-mate signal routing by new span on the Pi and attended-host paths, including an unrelated open hold, mixed, same-key, stamped-key, key-less blocked, and resolution spans, the whole-log fallback, stale-row isolation, and crewmate routing.

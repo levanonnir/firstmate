@@ -179,11 +179,10 @@ const PROCESSING_MESSAGE_TYPE = "fm-branch-process";
 // (deliverAs nextTurn). Bounded so an answer that repeatedly ignores the
 // request cannot become an unbounded loop of empty turns.
 const PROCESSING_TRIGGERED_ATTEMPTS = 2;
-// One provider failure rejects immediately to watcher-owned fallback but leaves
-// room for a transient outage to recover on the next wake. A second consecutive
-// provider failure latches the branch off. While latched, main keeps every wake
+// One unproductive model turn falls back to the watcher but leaves room for
+// a transient failure to recover on the next wake. A second latches the branch off. While latched, main keeps every wake
 // except one branch recovery probe after each exponentially backed-off cooldown.
-const PROVIDER_ERROR_LATCH_THRESHOLD = 2;
+const UNPRODUCTIVE_TURN_LATCH_THRESHOLD = 2;
 const PROVIDER_REPROBE_BASE_MS = 5 * 60 * 1000;
 const PROVIDER_REPROBE_MAX_MS = 60 * 60 * 1000;
 const PROCESSING_INSTRUCTION =
@@ -239,17 +238,20 @@ function isProcessingCustomMessage(message: { role?: string; customType?: string
 // only the final assistant entry appended by this prompt: unlike the rebuilt
 // in-memory message context, SessionManager entries remain append-only across
 // prompt-preflight compaction.
-function settledPromptProviderError(sessionManager: SessionManager, entryOffset: number): string | null {
+type SettledPromptResult = { kind: "model-replied" | "unobserved" } | { kind: "provider-error"; detail: string };
+function settledPromptResult(sessionManager: SessionManager, entryOffset: number): SettledPromptResult {
   const entries = sessionManager.getEntries();
   for (let index = entries.length - 1; index >= entryOffset; index -= 1) {
     const entry = entries[index];
     if (entry.type !== "message") continue;
     const message = (entry as { message?: { role?: string; stopReason?: string; errorMessage?: string } }).message;
     if (message?.role !== "assistant") continue;
-    if (message.stopReason !== "error") return null;
-    return message.errorMessage?.trim() || "assistant settled with stopReason error";
+    if (message.stopReason === "error") {
+      return { kind: "provider-error", detail: message.errorMessage?.trim() || "assistant settled with stopReason error" };
+    }
+    return { kind: message.stopReason === "aborted" ? "unobserved" : "model-replied" };
   }
-  return null;
+  return { kind: "unobserved" };
 }
 
 // One model the runtime can hand back, without importing a model type
@@ -259,6 +261,8 @@ type BranchModel = NonNullable<ReturnType<ModelRuntime["getModel"]>>;
 type BranchEffort = ReturnType<NonNullable<ExtensionAPI["getThinkingLevel"]>>;
 type PinnedBranchModel = { model: BranchModel; modelRuntime: ModelRuntime };
 type BranchModelResolution = { ok: true; selection: PinnedBranchModel } | { ok: false; reason: string };
+class BranchModelUnavailable extends Error {}
+
 type FollowMainResolution =
   | { ok: true; selection: PinnedBranchModel }
   | { ok: false; reason: string; refusesBuild: boolean };
@@ -587,7 +591,7 @@ export default function (pi: ExtensionAPI) {
   };
   let branch: BranchSession | null = null;
   let branchBroken = "";
-  let consecutiveProviderErrors = 0;
+  let consecutiveUnproductiveTurns = 0;
   let providerRecovery: ProviderRecovery | null = null;
   // A revision advances only after fm_branch_report has appended successfully,
   // so a prompt can prove that it created a durable outcome after claiming its
@@ -706,13 +710,17 @@ export default function (pi: ExtensionAPI) {
 
   function deliverBranchHealthNote(text: string): void {
     const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${text}`, display: true };
-    if (mainStreaming) pi.sendMessage(message, { deliverAs: "nextTurn" });
-    else pi.sendMessage(message, {});
+    try {
+      if (mainStreaming) pi.sendMessage(message, { deliverAs: "nextTurn" });
+      else pi.sendMessage(message, {});
+    } catch {
+      // A display failure cannot change the disposition of a wake.
+    }
   }
 
-  function recordSettledProviderError(detail: string): void {
-    consecutiveProviderErrors += 1;
-    if (consecutiveProviderErrors < PROVIDER_ERROR_LATCH_THRESHOLD && !providerRecovery) return;
+  function recordUnproductiveTurn(detail: string, cause: "provider-error" | "missing-report"): void {
+    consecutiveUnproductiveTurns += 1;
+    if (consecutiveUnproductiveTurns < UNPRODUCTIVE_TURN_LATCH_THRESHOLD && !providerRecovery) return;
     const previousCooldownMs = providerRecovery?.cooldownMs;
     const firstLatch = previousCooldownMs === undefined;
     const cooldownMs = firstLatch
@@ -725,13 +733,14 @@ export default function (pi: ExtensionAPI) {
       probeInFlight: false,
     };
     if (firstLatch) {
-      deliverBranchHealthNote("Supervision branch paused after repeated provider errors; main will handle wakes while it cools down.");
+      const reason = cause === "provider-error" ? "repeated provider errors" : "repeated turns without a saved outcome";
+      deliverBranchHealthNote(`Supervision branch paused after ${reason}; main will handle wakes while it cools down.`);
     }
   }
 
   function recordDurableBranchReport(reportGeneration: number, reportSelectionRevision: number): void {
     if (reportGeneration !== generation || reportSelectionRevision !== branchSelectionRevision) return;
-    consecutiveProviderErrors = 0;
+    consecutiveUnproductiveTurns = 0;
     if (!providerRecovery) return;
     branchBroken = "";
     providerRecovery = null;
@@ -813,7 +822,7 @@ export default function (pi: ExtensionAPI) {
   async function preparePinnedBranchModel(pin: { provider: string; modelId: string }): Promise<PinnedBranchModel> {
     const resolved = await resolveBranchModel(pin.provider, pin.modelId);
     if (!resolved.ok) {
-      throw new Error(`supervision model pin ${resolved.reason} (config/supervision-branch-model)`);
+      throw new BranchModelUnavailable(`supervision model pin ${resolved.reason} (config/supervision-branch-model)`);
     }
     return resolved.selection;
   }
@@ -860,7 +869,7 @@ export default function (pi: ExtensionAPI) {
     if (!mainModel) return undefined;
     const following = await followMainModel(mainModel);
     if (following.ok) return following.selection;
-    if (following.refusesBuild) throw new Error(following.reason);
+    if (following.refusesBuild) throw new BranchModelUnavailable(following.reason);
     return undefined;
   }
 
@@ -1436,6 +1445,11 @@ ${context.command}
         if (buildRevision !== branchSelectionRevision) continue;
         if (expectedGeneration === generation && !shuttingDown) {
           branchBroken = error instanceof Error ? error.message : String(error);
+          if (error instanceof BranchModelUnavailable) {
+            // The broken latch prevents repeated attempts for this selection.
+            // Never show arbitrary provider or configuration details here.
+            deliverBranchHealthNote("Supervision model unavailable. Main will handle wakes. Use /supervision-model to pick an independent model.");
+          }
         }
         throw error;
       }
@@ -1558,19 +1572,29 @@ ${context.command}
         } finally {
           wakeTaskScope = null;
         }
-        const providerError = settledPromptProviderError(sessionManager, entryOffset);
-        if (providerError) {
-          const detail = `supervision branch provider failed after construction: ${providerError}`;
+        const result = settledPromptResult(sessionManager, entryOffset);
+        if (result.kind === "provider-error") {
+          const detail = `supervision branch provider failed after construction: ${result.detail}`;
           if (
             branchForWake.generation === generation &&
             branchForWake.selectionRevision === branchSelectionRevision
           ) {
-            recordSettledProviderError(detail);
+            recordUnproductiveTurn(detail, "provider-error");
           }
           throw new Error(detail);
         }
         if (durableReportRevision <= reportRevisionBeforePrompt) {
-          throw new Error("supervision branch prompt settled but produced no durable outcome for its claimed wake rows");
+          const detail = "supervision branch prompt settled but produced no durable outcome for its claimed wake rows";
+          // An interrupted or unobserved turn still hands its wake back,
+          // but only a recorded model turn is evidence of repeated waste.
+          if (
+            result.kind === "model-replied" &&
+            branchForWake.generation === generation &&
+            branchForWake.selectionRevision === branchSelectionRevision
+          ) {
+            recordUnproductiveTurn(detail, "missing-report");
+          }
+          throw new Error(detail);
         }
         recordDurableBranchReport(branchForWake.generation, branchForWake.selectionRevision);
         if (!(await releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration)))) {
@@ -1596,7 +1620,7 @@ ${context.command}
   // Clearing the broken latch is what lets a corrected pin recover in place.
   function releaseBranchForSelectionChange(): void {
     branchBroken = "";
-    consecutiveProviderErrors = 0;
+    consecutiveUnproductiveTurns = 0;
     providerRecovery = null;
     const stale = branch;
     branch = null;
@@ -1818,7 +1842,7 @@ ${context.command}
     // cancelled by its own recheck rather than racing this one.
     shuttingDown = false;
     branchBroken = "";
-    consecutiveProviderErrors = 0;
+    consecutiveUnproductiveTurns = 0;
     providerRecovery = null;
     generation += 1;
     activeProcessing = null;

@@ -2728,12 +2728,16 @@ test_settled_branch_prompt_releases_unacknowledged_grant() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, realRoot, mainUserMessages }; })()`);
-const { dispatch, fire, home, realRoot, mainUserMessages } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, realRoot, mainUserMessages, sentToMain }; })()`);
+const { dispatch, fire, home, realRoot, mainUserMessages, sentToMain } = globalThis.__t;
 const { spawnSync } = await import("node:child_process");
 const { existsSync } = await import("node:fs");
 
 await fire("session_start", {});
+globalThis.__fmOnBranchPrompt = ({ session }) => {
+  session.messages.push({ role: "assistant", content: [], stopReason: "stop" });
+};
+
 const offer = dispatch("signal: unacknowledged branch wake");
 if (!offer.accepted) throw new Error("eligible wake was not accepted");
 for (let i = 0; i < 250 && (globalThis.__fmPrompts ?? []).length === 0; i += 1) {
@@ -2754,6 +2758,16 @@ for (let i = 0; i < 250 && existsSync(`${home}/state/.branch-eligible-rows`); i 
 if (existsSync(`${home}/state/.branch-eligible-rows`)) {
   throw new Error("settled prompt left its unacknowledged grant active");
 }
+const second = dispatch("signal: another branch wake without an outcome");
+if (!second.accepted) throw new Error("the branch paused after only one missing report");
+const secondFailure = await second.settlement.then(() => null, (error) => error);
+if (!secondFailure?.message.includes("produced no durable outcome")) throw new Error("the second wake was not handed back");
+if (dispatch("signal: skip the branch during cooldown").accepted) throw new Error("the branch kept accepting wakes with no report");
+if (globalThis.__fmPrompts.length !== 2) throw new Error("the cooldown allowed another branch model turn");
+if (existsSync(`${home}/state/.branch-eligible-rows`)) throw new Error("the latched wake still owns a grant");
+if (sentToMain.filter((x) => x.message.content.includes("repeated turns without a saved outcome")).length !== 1) {
+  throw new Error("expected exactly one missing-outcome health note");
+}
 const drain = spawnSync("bash", [`${realRoot}/bin/fm-wake-drain.sh`], {
   encoding: "utf8",
   env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state`, FM_ROOT_OVERRIDE: realRoot },
@@ -2767,7 +2781,7 @@ EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "settled branch turns must release residual grants for main replay: $out"
-  pass "a settled branch turn without a durable outcome falls back and releases its grant for main replay"
+  pass "a settled branch turn without a durable outcome falls back and releases its grant; repeated no-report turns trip cooldown"
 }
 
 test_post_construction_provider_error_falls_back_latches_and_recovers_on_cooldown() {
@@ -3554,8 +3568,8 @@ test_supervision_model_command_persists_and_rebinds_the_live_branch() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, makeCtx, commands, registryModels, uiSelections, uiPrompts, notices, home }; })()`);
-const { fire, dispatch, settle, makeCtx, commands, registryModels, uiSelections, uiPrompts, notices, home } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { sentToMain, fire, dispatch, settle, makeCtx, commands, registryModels, uiSelections, uiPrompts, notices, home }; })()`);
+const { sentToMain, fire, dispatch, settle, makeCtx, commands, registryModels, uiSelections, uiPrompts, notices, home } = globalThis.__t;
 import { existsSync, readFileSync, statSync } from "node:fs";
 
 registryModels.push(
@@ -3733,6 +3747,19 @@ if (!(refusal instanceof Error) || !refusal.message.includes("refuses to build")
   throw new Error(`the build did not refuse as the picker reported: ${String(refusal)}`);
 }
 if (globalThis.__fmSessions.length !== 6) throw new Error("a refused native follow still built a branch");
+if (dispatch("signal: blocked model stays off").accepted) throw new Error("the broken selection accepted another wake");
+const health = sentToMain.filter((x) => x.message.content.includes("Supervision model unavailable"));
+if (health.length !== 1 || !health[0].message.content.includes("/supervision-model")) {
+  throw new Error("expected one actionable notice for the failed model selection");
+}
+uiSelections.push("openai-codex/cheap-oauth");
+await command.handler("", nativeCtx);
+const repaired = dispatch("signal: a valid pin restores supervision");
+if (!repaired.accepted) throw new Error("the corrected pin did not clear the broken selection");
+await settle(() => globalThis.__fmSessions.length === 7, "replacement branch after model fix");
+if (globalThis.__fmSessions[6].options.model?.id !== "cheap-oauth") {
+  throw new Error("the repaired branch did not use the independently pinned model");
+}
 process.exit(0);
 EOF
   status=$?
